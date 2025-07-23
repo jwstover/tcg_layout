@@ -1,6 +1,18 @@
+use super::{CardSizeOption, PageSizeOption};
+use crate::types::{FillOrder, LayoutParams, PageOrientation};
 use eframe::egui;
-use crate::types::{LayoutParams, FillOrder, PageOrientation};
-use super::{PageSizeOption, CardSizeOption};
+
+// Helper function to get brighter weak text color
+fn bright_weak_text_color(ui: &egui::Ui) -> egui::Color32 {
+    let base_color = ui.visuals().weak_text_color();
+    // Brighten weak text more significantly
+    egui::Color32::from_rgba_unmultiplied(
+        (base_color.r() as f32 * 1.5).min(255.0) as u8,
+        (base_color.g() as f32 * 1.5).min(255.0) as u8,
+        (base_color.b() as f32 * 1.5).min(255.0) as u8,
+        base_color.a(),
+    )
+}
 
 pub fn show_parameters_panel(
     ui: &mut egui::Ui,
@@ -12,8 +24,10 @@ pub fn show_parameters_panel(
     card_size_option: &mut CardSizeOption,
 ) {
     ui.heading("Layout Parameters");
+    ui.add_space(8.0);
 
     ui.separator();
+    ui.add_space(8.0);
 
     egui::Grid::new("params_grid")
         .num_columns(2)
@@ -41,7 +55,7 @@ pub fn show_parameters_panel(
                         }
                         ui.selectable_value(page_size_option, PageSizeOption::Custom, PageSizeOption::Custom.display_name());
                     });
-                
+
                 if *page_size_option == PageSizeOption::Custom {
                     ui.horizontal(|ui| {
                         ui.add(egui::DragValue::new(&mut layout_params.page_size.0)
@@ -92,7 +106,7 @@ pub fn show_parameters_panel(
                         }
                         ui.selectable_value(card_size_option, CardSizeOption::Custom, CardSizeOption::Custom.display_name());
                     });
-                
+
                 if *card_size_option == CardSizeOption::Custom {
                     ui.horizontal(|ui| {
                         ui.add(egui::DragValue::new(&mut layout_params.card_size.0)
@@ -153,7 +167,12 @@ pub fn show_parameters_panel(
             });
             ui.end_row();
 
-            ui.label("Fill Order:");
+            ui.horizontal(|ui| {
+                ui.label("Fill Order:");
+                ui.colored_label(bright_weak_text_color(ui), "(?)").on_hover_text(
+                    "Determines how cards are arranged:\n• Row Major: Fill left to right, then down\n• Column Major: Fill top to bottom, then right"
+                );
+            });
             egui::ComboBox::from_id_source("fill_order_combo")
                 .selected_text(match layout_params.orientation {
                     FillOrder::RowMajor => "Row Major (left to right, then down)",
@@ -165,27 +184,54 @@ pub fn show_parameters_panel(
                 });
             ui.end_row();
 
-            ui.label("Target DPI:");
+            ui.horizontal(|ui| {
+                ui.label("Target DPI:");
+                ui.colored_label(bright_weak_text_color(ui), "(?)").on_hover_text(
+                    "Target resolution for export.\nHigher DPI = better quality but larger file size.\nCommon values: 72 (screen), 150 (draft), 300 (print)"
+                );
+            });
             ui.add(egui::DragValue::new(&mut layout_params.target_dpi)
                 .speed(10)
                 .range(72..=600));
             ui.end_row();
         });
 
+    ui.add_space(8.0);
     ui.separator();
+    ui.add_space(8.0);
 
     if ui.button("Validate Parameters").clicked() {
-        validate_params(layout_params, validation_errors, show_success_message, success_message_timer);
+        validate_params(
+            layout_params,
+            validation_errors,
+            show_success_message,
+            success_message_timer,
+        );
     }
 
     if !validation_errors.is_empty() {
+        ui.add_space(8.0);
         ui.separator();
-        ui.colored_label(egui::Color32::RED, "Validation Errors:");
-        for error in validation_errors.iter() {
-            ui.colored_label(egui::Color32::RED, format!("• {}", error));
-        }
+        ui.add_space(8.0);
+
+        ui.strong("Validation Errors:");
+        ui.add_space(4.0);
+
+        egui::Frame::none()
+            .fill(ui.visuals().error_fg_color.gamma_multiply(0.1))
+            .rounding(egui::Rounding::same(4.0))
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                for error in validation_errors.iter() {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(ui.visuals().error_fg_color, "•");
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    });
+                }
+            });
     }
 
+    ui.add_space(8.0);
     if ui.button("Reset to Defaults").clicked() {
         *layout_params = LayoutParams::default();
         *page_size_option = PageSizeOption::A4;

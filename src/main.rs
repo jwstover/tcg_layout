@@ -1,19 +1,19 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
-pub mod types;
-pub mod layout;
-pub mod ui;
 pub mod image_processing;
-pub mod thumbnail_manager;
+pub mod layout;
 pub mod svg_export;
+pub mod thumbnail_manager;
+pub mod types;
+pub mod ui;
 
-use eframe::egui;
-use types::{LayoutParams, Card};
-use ui::{PageSizeOption, CardSizeOption};
-use ui::{parameters_panel, card_list_panel, preview_panel};
-use ui::preview_panel::PreviewState;
-use thumbnail_manager::{ThumbnailManager, ThumbnailMessage};
 use crate::svg_export::export_pages_to_single_svg;
+use eframe::egui;
+use thumbnail_manager::{ThumbnailManager, ThumbnailMessage};
+use types::{Card, LayoutParams};
+use ui::preview_panel::PreviewState;
+use ui::{card_list_panel, parameters_panel, preview_panel};
+use ui::{CardSizeOption, PageSizeOption};
 
 #[tokio::main]
 async fn main() -> Result<(), eframe::Error> {
@@ -30,7 +30,6 @@ async fn main() -> Result<(), eframe::Error> {
         Box::new(|_cc| Ok(Box::<TcgLayoutApp>::default())),
     )
 }
-
 
 struct TcgLayoutApp {
     layout_params: LayoutParams,
@@ -60,7 +59,6 @@ impl Default for TcgLayoutApp {
     }
 }
 
-
 impl TcgLayoutApp {
     fn import_images(&mut self) {
         let files = rfd::FileDialog::new()
@@ -71,7 +69,7 @@ impl TcgLayoutApp {
         if let Some(paths) = files {
             for path in paths {
                 let mut card = Card::new(path.clone());
-                
+
                 // Check if thumbnail is already cached
                 if let Some(thumbnail) = self.thumbnail_manager.request_thumbnail(path.clone()) {
                     // Cache hit - set thumbnail immediately
@@ -80,14 +78,14 @@ impl TcgLayoutApp {
                     // Cache miss - set loading state and request async loading
                     card.set_thumbnail_loading();
                 }
-                
+
                 self.selected_cards.push(card);
             }
             // Reset to first page when new cards are added
             self.preview_state.reset_to_first_page();
         }
     }
-    
+
     fn process_thumbnail_messages(&mut self) {
         while let Some(message) = self.thumbnail_manager.try_recv_message() {
             match message {
@@ -145,7 +143,11 @@ impl TcgLayoutApp {
             // Export all pages to single SVG file
             match export_pages_to_single_svg(&pages, &self.layout_params, &output_path) {
                 Ok(()) => {
-                    println!("Successfully exported {} pages to SVG: {:?}", pages.len(), output_path);
+                    println!(
+                        "Successfully exported {} pages to SVG: {:?}",
+                        pages.len(),
+                        output_path
+                    );
                     // Show success message
                     self.show_success_message = true;
                     self.success_message_timer = 3.0;
@@ -163,12 +165,12 @@ impl eframe::App for TcgLayoutApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Process thumbnail messages from background loader
         self.process_thumbnail_messages();
-        
+
         // Request repaint if we have pending thumbnails to keep UI updating
         if self.thumbnail_manager.has_pending_requests() {
             ctx.request_repaint();
         }
-        
+
         // Menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -209,24 +211,24 @@ impl eframe::App for TcgLayoutApp {
             .width_range(150.0..=400.0)
             .show(ctx, |ui| {
                 card_list_panel::show_card_list_panel(
-                    ui, 
+                    ui,
                     &self.selected_cards,
                     |index| cards_to_remove = Some(index),
                     || should_import = true,
-                    |index, new_count| copy_count_changes = Some((index, new_count))
+                    |index, new_count| copy_count_changes = Some((index, new_count)),
                 );
             });
-        
+
         // Handle card removal
         if let Some(index) = cards_to_remove {
             self.remove_card(index);
         }
-        
+
         // Handle copy count changes
         if let Some((index, new_count)) = copy_count_changes {
             self.update_card_copy_count(index, new_count);
         }
-        
+
         // Handle import request
         if should_import {
             self.import_images();
@@ -267,10 +269,21 @@ impl eframe::App for TcgLayoutApp {
                 .collapsible(false)
                 .anchor(egui::Align2::CENTER_TOP, [0.0, 50.0])
                 .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(0, 150, 0), "✓");
-                        ui.colored_label(egui::Color32::from_rgb(0, 120, 0), "Parameters are valid!");
-                    });
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(220, 255, 220))
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::same(12.0))
+                        .shadow(egui::Shadow::default())
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(egui::Color32::from_rgb(0, 150, 0), "✓");
+                                ui.add_space(8.0);
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(0, 120, 0),
+                                    "Parameters are valid!",
+                                );
+                            });
+                        });
                 });
         }
 
