@@ -178,6 +178,13 @@ cargo test --bin layout_demo # Binary tests
 - Image metadata extraction
 - Thumbnail caching behavior
 
+## Development workflow
+
+1. Plan steps to implement new feature / bugfix
+2. Implemnt changes
+3. Run tests
+4. Come up with commit message and prompt for confirmation before committing
+
 ## Common Development Tasks
 
 ### Adding New Layout Parameters
