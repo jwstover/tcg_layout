@@ -4,29 +4,6 @@ use eframe::egui;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-// Helper function to get brighter text color
-fn bright_text_color(ui: &egui::Ui) -> egui::Color32 {
-    let base_color = ui.visuals().text_color();
-    // Brighten the text by increasing the luminance
-    egui::Color32::from_rgba_unmultiplied(
-        (base_color.r() as f32 * 1.3).min(255.0) as u8,
-        (base_color.g() as f32 * 1.3).min(255.0) as u8,
-        (base_color.b() as f32 * 1.3).min(255.0) as u8,
-        base_color.a(),
-    )
-}
-
-// Helper function to get brighter weak text color
-fn bright_weak_text_color(ui: &egui::Ui) -> egui::Color32 {
-    let base_color = ui.visuals().weak_text_color();
-    // Brighten weak text more significantly
-    egui::Color32::from_rgba_unmultiplied(
-        (base_color.r() as f32 * 1.5).min(255.0) as u8,
-        (base_color.g() as f32 * 1.5).min(255.0) as u8,
-        (base_color.b() as f32 * 1.5).min(255.0) as u8,
-        base_color.a(),
-    )
-}
 
 pub struct PreviewState {
     current_page: usize,
@@ -96,7 +73,7 @@ pub fn show_preview_panel(
 
     if cards.is_empty() {
         ui.colored_label(
-            bright_weak_text_color(ui),
+            ui.visuals().weak_text_color(),
             "No cards selected. Import images to see preview.",
         );
         return;
@@ -125,7 +102,7 @@ pub fn show_preview_panel(
         }
 
         ui.colored_label(
-            bright_text_color(ui),
+            ui.visuals().text_color(),
             format!("Page {} of {}", preview_state.current_page + 1, pages.len()),
         );
 
@@ -133,10 +110,6 @@ pub fn show_preview_panel(
             preview_state.current_page += 1;
         }
     });
-
-    ui.add_space(8.0);
-    ui.separator();
-    ui.add_space(8.0);
 
     // Calculate scale to fit preview in available space
     let available_rect = ui.available_rect_before_wrap();
@@ -172,13 +145,13 @@ pub fn show_preview_panel(
     ui.painter().rect_filled(
         preview_rect,
         egui::Rounding::same(4.0),
-        ui.visuals().extreme_bg_color,
+        egui::Color32::from_rgb(255, 255, 255),
     );
 
     ui.painter().rect_stroke(
         preview_rect,
         egui::Rounding::same(4.0),
-        egui::Stroke::new(2.0, bright_text_color(ui)),
+        egui::Stroke::new(2.0, ui.visuals().text_color()),
     );
 
     // Draw cards for current page
@@ -221,7 +194,7 @@ pub fn show_preview_panel(
                         ui,
                         card_rect,
                         card,
-                        egui::Color32::from_rgb(200, 220, 255),
+                        ui.visuals().faint_bg_color,
                     );
                 }
             }
@@ -235,7 +208,7 @@ pub fn show_preview_panel(
             }
             ThumbnailState::NotLoaded => {
                 // Draw default placeholder
-                draw_placeholder_card(ui, card_rect, card, egui::Color32::from_rgb(200, 220, 255));
+                draw_placeholder_card(ui, card_rect, card, ui.visuals().faint_bg_color);
             }
         }
     }
@@ -254,12 +227,12 @@ pub fn show_preview_panel(
                 ui.strong(format!("Grid: {}×{}", grid.cols, grid.rows));
                 ui.separator();
                 ui.colored_label(
-                    bright_text_color(ui),
+                    ui.visuals().text_color(),
                     format!("Cards per page: {}", grid.cards_per_page),
                 );
                 ui.separator();
                 ui.colored_label(
-                    bright_text_color(ui),
+                    ui.visuals().text_color(),
                     format!("Total cards: {}", cards.len()),
                 );
             });
@@ -279,7 +252,7 @@ fn draw_placeholder_card(
     ui.painter().rect_stroke(
         card_rect,
         egui::Rounding::same(2.0),
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 200)),
+        egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
     );
 
     // Draw card filename (if it fits)
@@ -295,7 +268,7 @@ fn draw_placeholder_card(
             egui::Align2::CENTER_CENTER,
             filename,
             egui::FontId::proportional(10.0),
-            bright_text_color(ui),
+            ui.visuals().text_color(),
         );
     }
 }
@@ -305,13 +278,13 @@ fn draw_loading_card(ui: &mut egui::Ui, card_rect: egui::Rect, _card: &Card) {
     ui.painter().rect_filled(
         card_rect,
         egui::Rounding::same(2.0),
-        egui::Color32::from_rgb(240, 240, 180), // Light yellow
+        ui.visuals().code_bg_color, // Loading state
     );
 
     ui.painter().rect_stroke(
         card_rect,
         egui::Rounding::same(2.0),
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 200, 100)),
+        egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
     );
 
     // Draw loading indicator
@@ -331,7 +304,7 @@ fn draw_loading_card(ui: &mut egui::Ui, card_rect: egui::Rect, _card: &Card) {
             );
 
             ui.painter()
-                .circle_filled(dot_pos, 2.0, egui::Color32::from_rgb(100, 150, 200));
+                .circle_filled(dot_pos, 2.0, ui.visuals().text_color());
         }
 
         // Draw "Loading..." text below
@@ -341,7 +314,7 @@ fn draw_loading_card(ui: &mut egui::Ui, card_rect: egui::Rect, _card: &Card) {
             egui::Align2::CENTER_CENTER,
             "Loading...",
             egui::FontId::proportional(9.0),
-            bright_text_color(ui),
+            ui.visuals().text_color(),
         );
     }
 }
@@ -351,13 +324,13 @@ fn draw_error_card(ui: &mut egui::Ui, card_rect: egui::Rect, card: &Card, _error
     ui.painter().rect_filled(
         card_rect,
         egui::Rounding::same(2.0),
-        egui::Color32::from_rgb(255, 200, 200), // Light red
+        ui.visuals().error_fg_color.gamma_multiply(0.1), // Error state background
     );
 
     ui.painter().rect_stroke(
         card_rect,
         egui::Rounding::same(2.0),
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 100, 100)),
+        egui::Stroke::new(1.0, ui.visuals().error_fg_color),
     );
 
     // Draw error indicator
@@ -371,14 +344,14 @@ fn draw_error_card(ui: &mut egui::Ui, card_rect: egui::Rect, card: &Card, _error
                 egui::pos2(center.x - size, center.y - size),
                 egui::pos2(center.x + size, center.y + size),
             ],
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(150, 50, 50)),
+            egui::Stroke::new(2.0, ui.visuals().error_fg_color),
         );
         ui.painter().line_segment(
             [
                 egui::pos2(center.x + size, center.y - size),
                 egui::pos2(center.x - size, center.y + size),
             ],
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(150, 50, 50)),
+            egui::Stroke::new(2.0, ui.visuals().error_fg_color),
         );
 
         // Draw filename and error text
@@ -393,7 +366,7 @@ fn draw_error_card(ui: &mut egui::Ui, card_rect: egui::Rect, card: &Card, _error
             egui::Align2::CENTER_CENTER,
             filename,
             egui::FontId::proportional(8.0),
-            bright_text_color(ui),
+            ui.visuals().text_color(),
         );
 
         ui.painter().text(

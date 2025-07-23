@@ -6,6 +6,7 @@ pub mod svg_export;
 pub mod thumbnail_manager;
 pub mod types;
 pub mod ui;
+pub mod style;
 
 use crate::svg_export::export_pages_to_single_svg;
 use eframe::egui;
@@ -171,6 +172,8 @@ impl eframe::App for TcgLayoutApp {
             ctx.request_repaint();
         }
 
+        ctx.set_style(style::style());
+
         // Menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -270,16 +273,16 @@ impl eframe::App for TcgLayoutApp {
                 .anchor(egui::Align2::CENTER_TOP, [0.0, 50.0])
                 .show(ctx, |ui| {
                     egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(220, 255, 220))
+                        .fill(ctx.style().visuals.faint_bg_color)
                         .rounding(egui::Rounding::same(8.0))
                         .inner_margin(egui::Margin::same(12.0))
                         .shadow(egui::Shadow::default())
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.colored_label(egui::Color32::from_rgb(0, 150, 0), "✓");
+                                ui.colored_label(ctx.style().visuals.text_color(), "✓");
                                 ui.add_space(8.0);
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(0, 120, 0),
+                                    ctx.style().visuals.text_color(),
                                     "Parameters are valid!",
                                 );
                             });

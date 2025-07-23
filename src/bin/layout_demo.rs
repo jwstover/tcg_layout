@@ -1,5 +1,5 @@
 use tcg_layout::layout::{calculate_grid, generate_positions};
-use tcg_layout::types::{LayoutParams, Margins, FillOrder, PageOrientation};
+use tcg_layout::types::{FillOrder, LayoutParams, Margins, PageOrientation};
 
 fn main() {
     println!("TCG Card Layout Demo");
@@ -46,8 +46,8 @@ fn main() {
     println!("Demo 4: Landscape Layout (A4 landscape, Poker Cards, Row-Major)");
     println!("---------------------------------------------------------------");
     let landscape_params = LayoutParams {
-        page_size: (210.0, 297.0),  // A4 but will be used as landscape
-        card_size: (63.0, 88.0),    // Poker card
+        page_size: (210.0, 297.0), // A4 but will be used as landscape
+        card_size: (63.0, 88.0),   // Poker card
         margins: Margins::uniform(10.0),
         spacing: (2.0, 2.0),
         orientation: FillOrder::RowMajor,
@@ -60,15 +60,25 @@ fn main() {
 fn demo_layout(params: LayoutParams, num_cards: usize) {
     // Calculate grid layout
     let grid = calculate_grid(&params);
-    
+
     // Print layout information
     println!("Layout Parameters:");
-    println!("  Page Size: {:.1} x {:.1} mm", params.page_size.0, params.page_size.1);
-    println!("  Card Size: {:.1} x {:.1} mm", params.card_size.0, params.card_size.1);
-    println!("  Margins: T:{:.1} R:{:.1} B:{:.1} L:{:.1} mm", 
-             params.margins.top, params.margins.right, 
-             params.margins.bottom, params.margins.left);
-    println!("  Spacing: {:.1} x {:.1} mm", params.spacing.0, params.spacing.1);
+    println!(
+        "  Page Size: {:.1} x {:.1} mm",
+        params.page_size.0, params.page_size.1
+    );
+    println!(
+        "  Card Size: {:.1} x {:.1} mm",
+        params.card_size.0, params.card_size.1
+    );
+    println!(
+        "  Margins: T:{:.1} R:{:.1} B:{:.1} L:{:.1} mm",
+        params.margins.top, params.margins.right, params.margins.bottom, params.margins.left
+    );
+    println!(
+        "  Spacing: {:.1} x {:.1} mm",
+        params.spacing.0, params.spacing.1
+    );
     println!("  Fill Order: {:?}", params.orientation);
     println!("  Page Orientation: {:?}", params.page_orientation);
     println!();
@@ -76,19 +86,30 @@ fn demo_layout(params: LayoutParams, num_cards: usize) {
     println!("Grid Calculation:");
     println!("  Grid: {} rows x {} columns", grid.rows, grid.cols);
     println!("  Cards per page: {}", grid.cards_per_page);
-    println!("  Total pages needed for {} cards: {}", 
-             num_cards, (num_cards + grid.cards_per_page - 1) / grid.cards_per_page);
+    println!(
+        "  Total pages needed for {} cards: {}",
+        num_cards,
+        (num_cards + grid.cards_per_page - 1) / grid.cards_per_page
+    );
     println!();
 
     // Generate positions for first page
     let positions = generate_positions(&params, &grid);
     let cards_on_first_page = num_cards.min(grid.cards_per_page);
-    
-    println!("Card Positions (first page, {} cards):", cards_on_first_page);
+
+    println!(
+        "Card Positions (first page, {} cards):",
+        cards_on_first_page
+    );
     for (i, position) in positions.iter().enumerate().take(cards_on_first_page) {
-        println!("  Card {}: ({:.1}, {:.1}) mm", i + 1, position.x, position.y);
+        println!(
+            "  Card {}: ({:.1}, {:.1}) mm",
+            i + 1,
+            position.x,
+            position.y
+        );
     }
-    
+
     // Show available space utilization
     let (page_width, page_height) = match params.page_orientation {
         PageOrientation::Portrait => params.page_size,
@@ -96,14 +117,21 @@ fn demo_layout(params: LayoutParams, num_cards: usize) {
     };
     let available_width = page_width - params.margins.left - params.margins.right;
     let available_height = page_height - params.margins.top - params.margins.bottom;
-    let used_width = grid.cols as f32 * params.card_size.0 + (grid.cols - 1) as f32 * params.spacing.0;
-    let used_height = grid.rows as f32 * params.card_size.1 + (grid.rows - 1) as f32 * params.spacing.1;
-    
+    let used_width =
+        grid.cols as f32 * params.card_size.0 + (grid.cols - 1) as f32 * params.spacing.0;
+    let used_height =
+        grid.rows as f32 * params.card_size.1 + (grid.rows - 1) as f32 * params.spacing.1;
+
     println!();
     println!("Space Utilization:");
-    println!("  Available: {:.1} x {:.1} mm", available_width, available_height);
+    println!(
+        "  Available: {:.1} x {:.1} mm",
+        available_width, available_height
+    );
     println!("  Used: {:.1} x {:.1} mm", used_width, used_height);
-    println!("  Utilization: {:.1}% width, {:.1}% height", 
-             (used_width / available_width) * 100.0,
-             (used_height / available_height) * 100.0);
+    println!(
+        "  Utilization: {:.1}% width, {:.1}% height",
+        (used_width / available_width) * 100.0,
+        (used_height / available_height) * 100.0
+    );
 }

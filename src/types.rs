@@ -1,6 +1,6 @@
-use std::path::PathBuf;
-use std::collections::VecDeque;
 use image::ImageBuffer;
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,11 +59,11 @@ impl Margins {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutParams {
-    pub page_size: (f32, f32),      // (width, height) in mm
-    pub card_size: (f32, f32),      // (width, height) in mm
-    pub margins: Margins,           // margins in mm
-    pub spacing: (f32, f32),        // (horizontal, vertical) spacing in mm
-    pub orientation: FillOrder,     // RowMajor vs ColumnMajor
+    pub page_size: (f32, f32),             // (width, height) in mm
+    pub card_size: (f32, f32),             // (width, height) in mm
+    pub margins: Margins,                  // margins in mm
+    pub spacing: (f32, f32),               // (horizontal, vertical) spacing in mm
+    pub orientation: FillOrder,            // RowMajor vs ColumnMajor
     pub page_orientation: PageOrientation, // Portrait vs Landscape
     pub target_dpi: u32,
 }
@@ -71,8 +71,8 @@ pub struct LayoutParams {
 impl Default for LayoutParams {
     fn default() -> Self {
         Self {
-            page_size: (210.0, 297.0),     // A4 size in mm
-            card_size: (63.0, 88.0),       // Standard poker card size in mm
+            page_size: (210.0, 297.0), // A4 size in mm
+            card_size: (63.0, 88.0),   // Standard poker card size in mm
             margins: Margins::uniform(10.0),
             spacing: (2.0, 2.0),
             orientation: FillOrder::RowMajor,
@@ -114,58 +114,58 @@ impl Card {
             needs_scaling: false,
             copy_count: 1,
         };
-        
+
         // Only load DPI info synchronously (it's fast)
         card.load_dpi_info();
-        
+
         card
     }
-    
+
     pub fn set_thumbnail_loading(&mut self) {
         self.thumbnail_state = ThumbnailState::Loading;
     }
-    
+
     pub fn set_thumbnail_loaded(&mut self, thumbnail: ImageBuffer<image::Rgba<u8>, Vec<u8>>) {
         self.thumbnail_state = ThumbnailState::Loaded(thumbnail);
     }
-    
+
     pub fn set_thumbnail_failed(&mut self, error: String) {
         self.thumbnail_state = ThumbnailState::Failed(error);
     }
-    
+
     pub fn get_thumbnail(&self) -> Option<&ImageBuffer<image::Rgba<u8>, Vec<u8>>> {
         match &self.thumbnail_state {
             ThumbnailState::Loaded(thumbnail) => Some(thumbnail),
             _ => None,
         }
     }
-    
+
     pub fn is_thumbnail_loaded(&self) -> bool {
         matches!(self.thumbnail_state, ThumbnailState::Loaded(_))
     }
-    
+
     pub fn is_thumbnail_loading(&self) -> bool {
         matches!(self.thumbnail_state, ThumbnailState::Loading)
     }
-    
+
     pub fn set_copy_count(&mut self, count: u32) {
         self.copy_count = count.max(1); // Ensure minimum of 1
     }
-    
+
     pub fn get_copy_count(&self) -> u32 {
         self.copy_count
     }
-    
+
     pub fn increment_copy_count(&mut self) {
         self.copy_count += 1;
     }
-    
+
     pub fn decrement_copy_count(&mut self) {
         if self.copy_count > 1 {
             self.copy_count -= 1;
         }
     }
-    
+
     fn load_dpi_info(&mut self) {
         self.original_dpi = super::image_processing::get_image_dpi(&self.path);
         // Default to 72 DPI if not found in EXIF
@@ -204,8 +204,8 @@ pub struct GridLayout {
 
 #[derive(Debug, Clone)]
 pub struct CardPosition {
-    pub x: f32,     // x position in mm
-    pub y: f32,     // y position in mm
+    pub x: f32, // x position in mm
+    pub y: f32, // y position in mm
 }
 
 #[derive(Debug, Clone)]
@@ -235,7 +235,7 @@ mod tests {
     fn test_fill_order_variants() {
         let row_major = FillOrder::RowMajor;
         let column_major = FillOrder::ColumnMajor;
-        
+
         assert_ne!(row_major, column_major);
         assert_eq!(row_major, FillOrder::RowMajor);
         assert_eq!(column_major, FillOrder::ColumnMajor);
@@ -250,7 +250,7 @@ mod tests {
     fn test_page_orientation_variants() {
         let portrait = PageOrientation::Portrait;
         let landscape = PageOrientation::Landscape;
-        
+
         assert_ne!(portrait, landscape);
         assert_eq!(portrait, PageOrientation::Portrait);
         assert_eq!(landscape, PageOrientation::Landscape);
@@ -282,7 +282,7 @@ mod tests {
             bottom: 15.0,
             left: 20.0,
         };
-        
+
         assert_eq!(margins.top, 5.0);
         assert_eq!(margins.right, 10.0);
         assert_eq!(margins.bottom, 15.0);
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn test_layout_params_default() {
         let params = LayoutParams::default();
-        
+
         assert_eq!(params.page_size, (210.0, 297.0)); // A4
         assert_eq!(params.card_size, (63.0, 88.0)); // Poker card
         assert_eq!(params.margins, Margins::uniform(10.0));
@@ -314,7 +314,7 @@ mod tests {
             page_orientation: PageOrientation::Landscape,
             target_dpi: 600,
         };
-        
+
         assert_eq!(params.page_size, (100.0, 150.0));
         assert_eq!(params.card_size, (50.0, 70.0));
         assert_eq!(params.margins, custom_margins);
@@ -328,7 +328,7 @@ mod tests {
     fn test_card_new() {
         let path = PathBuf::from("/test/path/card.jpg");
         let card = Card::new(path.clone());
-        
+
         assert_eq!(card.path, path);
         // Thumbnail state will be NotLoaded initially
         assert!(matches!(card.thumbnail_state, ThumbnailState::NotLoaded));
@@ -342,10 +342,10 @@ mod tests {
     fn test_card_with_properties() {
         let path = PathBuf::from("/test/path/card.png");
         let mut card = Card::new(path.clone());
-        
+
         card.original_dpi = Some(150);
         card.needs_scaling = true;
-        
+
         assert_eq!(card.path, path);
         assert_eq!(card.original_dpi, Some(150));
         assert!(card.needs_scaling);
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn test_image_cache_new() {
         let cache = ImageCache::new(50);
-        
+
         assert_eq!(cache.thumbnails.cap().get(), 50);
         assert!(cache.loading_queue.is_empty());
         assert!(cache.background_loader.is_none());
@@ -370,7 +370,7 @@ mod tests {
             cards_per_page: 12,
             total_pages: 2,
         };
-        
+
         assert_eq!(layout.rows, 3);
         assert_eq!(layout.cols, 4);
         assert_eq!(layout.cards_per_page, 12);
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn test_card_position() {
         let position = CardPosition { x: 25.5, y: 40.2 };
-        
+
         assert_eq!(position.x, 25.5);
         assert_eq!(position.y, 40.2);
     }
@@ -389,12 +389,12 @@ mod tests {
     fn test_page_layout() {
         let card = Card::new(PathBuf::from("test.jpg"));
         let position = CardPosition { x: 10.0, y: 20.0 };
-        
+
         let page_layout = PageLayout {
             page_number: 1,
             cards: vec![(card.clone(), position)],
         };
-        
+
         assert_eq!(page_layout.page_number, 1);
         assert_eq!(page_layout.cards.len(), 1);
         assert_eq!(page_layout.cards[0].0.path, card.path);
@@ -410,7 +410,7 @@ mod tests {
             target_dpi: 300,
             message: "Low resolution detected".to_string(),
         };
-        
+
         assert_eq!(warning.card_path, PathBuf::from("low_res.jpg"));
         assert_eq!(warning.original_dpi, 72);
         assert_eq!(warning.target_dpi, 300);
@@ -427,7 +427,7 @@ mod tests {
             left: 10.0,
         };
         let margins3 = Margins::uniform(15.0);
-        
+
         assert_eq!(margins1, margins2);
         assert_ne!(margins1, margins3);
     }
@@ -438,7 +438,7 @@ mod tests {
         let params2 = LayoutParams::default();
         let mut params3 = LayoutParams::default();
         params3.target_dpi = 600;
-        
+
         assert_eq!(params1, params2);
         assert_ne!(params1, params3);
     }
@@ -447,7 +447,7 @@ mod tests {
     fn test_card_clone() {
         let original = Card::new(PathBuf::from("original.jpg"));
         let cloned = original.clone();
-        
+
         assert_eq!(original.path, cloned.path);
         assert_eq!(original.thumbnail_state, cloned.thumbnail_state);
         assert_eq!(original.original_dpi, cloned.original_dpi);
@@ -458,26 +458,26 @@ mod tests {
     #[test]
     fn test_card_copy_count_methods() {
         let mut card = Card::new(PathBuf::from("test.jpg"));
-        
+
         // Test initial copy count
         assert_eq!(card.get_copy_count(), 1);
-        
+
         // Test increment
         card.increment_copy_count();
         assert_eq!(card.get_copy_count(), 2);
-        
+
         // Test set copy count
         card.set_copy_count(5);
         assert_eq!(card.get_copy_count(), 5);
-        
+
         // Test decrement
         card.decrement_copy_count();
         assert_eq!(card.get_copy_count(), 4);
-        
+
         // Test minimum of 1
         card.set_copy_count(0);
         assert_eq!(card.get_copy_count(), 1);
-        
+
         // Test decrement at minimum
         card.decrement_copy_count();
         assert_eq!(card.get_copy_count(), 1);

@@ -6,7 +6,7 @@ Desktop application that automatically lays out Trading Card Game (TCG) card ima
 ## Development Environment
 
 ### Build Commands
-- `cargo run` - Run the application
+- `cargo run --bin tcg_layout` - Run the application
 - `cargo test` - Run all tests  
 - `cargo clippy` - Run linter checks
 - `cargo fmt` - Format code

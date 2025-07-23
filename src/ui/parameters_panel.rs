@@ -2,17 +2,6 @@ use super::{CardSizeOption, PageSizeOption};
 use crate::types::{FillOrder, LayoutParams, PageOrientation};
 use eframe::egui;
 
-// Helper function to get brighter weak text color
-fn bright_weak_text_color(ui: &egui::Ui) -> egui::Color32 {
-    let base_color = ui.visuals().weak_text_color();
-    // Brighten weak text more significantly
-    egui::Color32::from_rgba_unmultiplied(
-        (base_color.r() as f32 * 1.5).min(255.0) as u8,
-        (base_color.g() as f32 * 1.5).min(255.0) as u8,
-        (base_color.b() as f32 * 1.5).min(255.0) as u8,
-        base_color.a(),
-    )
-}
 
 pub fn show_parameters_panel(
     ui: &mut egui::Ui,
@@ -169,7 +158,7 @@ pub fn show_parameters_panel(
 
             ui.horizontal(|ui| {
                 ui.label("Fill Order:");
-                ui.colored_label(bright_weak_text_color(ui), "(?)").on_hover_text(
+                ui.colored_label(ui.visuals().weak_text_color(), "(?)").on_hover_text(
                     "Determines how cards are arranged:\n• Row Major: Fill left to right, then down\n• Column Major: Fill top to bottom, then right"
                 );
             });
@@ -186,7 +175,7 @@ pub fn show_parameters_panel(
 
             ui.horizontal(|ui| {
                 ui.label("Target DPI:");
-                ui.colored_label(bright_weak_text_color(ui), "(?)").on_hover_text(
+                ui.colored_label(ui.visuals().weak_text_color(), "(?)").on_hover_text(
                     "Target resolution for export.\nHigher DPI = better quality but larger file size.\nCommon values: 72 (screen), 150 (draft), 300 (print)"
                 );
             });

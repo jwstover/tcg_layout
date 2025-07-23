@@ -1,8 +1,8 @@
 use crate::types::{LayoutParams, PageLayout, PageOrientation};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 use svg::node::element::{Definitions, Group, Image, Rectangle};
 use svg::Document;
-use std::path::{Path, PathBuf};
 
 pub struct SvgExporter {
     params: LayoutParams,
@@ -24,15 +24,15 @@ impl SvgExporter {
     /// Export all pages to separate SVG files
     pub fn export_pages(&self, pages: &[PageLayout], output_dir: &Path) -> Result<Vec<PathBuf>> {
         let mut output_paths = Vec::new();
-        
+
         for page in pages {
             let filename = format!("page_{:03}.svg", page.page_number);
             let output_path = output_dir.join(filename);
-            
+
             self.export_page(page, &output_path)?;
             output_paths.push(output_path);
         }
-        
+
         Ok(output_paths)
     }
 
@@ -46,7 +46,7 @@ impl SvgExporter {
 
     fn create_svg_document(&self, page: &PageLayout) -> Result<Document> {
         let (page_width, page_height) = self.get_page_dimensions();
-        
+
         // Create SVG document with proper dimensions in mm
         let mut document = Document::new()
             .set("width", format!("{}mm", page_width))
@@ -60,8 +60,7 @@ impl SvgExporter {
         document = document.add(defs);
 
         // Create main group for the page content
-        let mut main_group = Group::new()
-            .set("id", format!("page-{}", page.page_number));
+        let mut main_group = Group::new().set("id", format!("page-{}", page.page_number));
 
         // Add background rectangle (optional, useful for print preview)
         let background = Rectangle::new()
@@ -71,7 +70,7 @@ impl SvgExporter {
             .set("height", page_height)
             .set("fill", "white")
             .set("stroke", "none");
-        
+
         main_group = main_group.add(background);
 
         // Add each card as an image reference
@@ -91,7 +90,7 @@ impl SvgExporter {
 
         let (page_width, page_height) = self.get_page_dimensions();
         let total_height = page_height * pages.len() as f32;
-        
+
         // Create SVG document with height for all pages
         let mut document = Document::new()
             .set("width", format!("{}mm", page_width))
@@ -107,7 +106,7 @@ impl SvgExporter {
         // Create a group for each page
         for (page_index, page) in pages.iter().enumerate() {
             let page_y_offset = page_index as f32 * page_height;
-            
+
             let mut page_group = Group::new()
                 .set("id", format!("page-{}", page.page_number))
                 .set("transform", format!("translate(0, {})", page_y_offset));
@@ -121,7 +120,7 @@ impl SvgExporter {
                 .set("fill", "white")
                 .set("stroke", "#cccccc")
                 .set("stroke-width", "0.5");
-            
+
             page_group = page_group.add(background);
 
             // Add each card as an image reference
@@ -136,10 +135,14 @@ impl SvgExporter {
         Ok(document)
     }
 
-    fn create_card_element(&self, card: &crate::types::Card, position: &crate::types::CardPosition) -> Result<Image> {
+    fn create_card_element(
+        &self,
+        card: &crate::types::Card,
+        position: &crate::types::CardPosition,
+    ) -> Result<Image> {
         // Convert the absolute path to a relative path or file URI
         let image_path = self.get_image_reference(&card.path)?;
-        
+
         let image = Image::new()
             .set("x", position.x)
             .set("y", position.y)
@@ -154,7 +157,7 @@ impl SvgExporter {
     fn get_image_reference(&self, image_path: &Path) -> Result<String> {
         // For desktop usage, use relative paths or file:// URIs
         // This preserves the original files rather than embedding them
-        
+
         if image_path.is_absolute() {
             // Convert to file:// URI for absolute paths
             let uri = format!("file://{}", image_path.display());
@@ -206,7 +209,9 @@ pub fn export_pages_to_single_svg(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Card, CardPosition, LayoutParams, PageLayout, Margins, FillOrder, PageOrientation};
+    use crate::types::{
+        Card, CardPosition, FillOrder, LayoutParams, Margins, PageLayout, PageOrientation,
+    };
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -224,9 +229,18 @@ mod tests {
 
     fn create_test_page() -> PageLayout {
         let cards = vec![
-            (Card::new(PathBuf::from("card1.jpg")), CardPosition { x: 5.0, y: 5.0 }),
-            (Card::new(PathBuf::from("card2.jpg")), CardPosition { x: 27.0, y: 5.0 }),
-            (Card::new(PathBuf::from("card3.jpg")), CardPosition { x: 5.0, y: 37.0 }),
+            (
+                Card::new(PathBuf::from("card1.jpg")),
+                CardPosition { x: 5.0, y: 5.0 },
+            ),
+            (
+                Card::new(PathBuf::from("card2.jpg")),
+                CardPosition { x: 27.0, y: 5.0 },
+            ),
+            (
+                Card::new(PathBuf::from("card3.jpg")),
+                CardPosition { x: 5.0, y: 37.0 },
+            ),
         ];
 
         PageLayout {
@@ -315,16 +329,19 @@ mod tests {
             create_test_page(),
             PageLayout {
                 page_number: 2,
-                cards: vec![(Card::new(PathBuf::from("card4.jpg")), CardPosition { x: 5.0, y: 5.0 })],
+                cards: vec![(
+                    Card::new(PathBuf::from("card4.jpg")),
+                    CardPosition { x: 5.0, y: 5.0 },
+                )],
             },
         ];
 
         let result = export_pages_to_svg(&pages, &params, temp_dir.path());
         assert!(result.is_ok());
-        
+
         let output_paths = result.unwrap();
         assert_eq!(output_paths.len(), 2);
-        
+
         for path in output_paths {
             assert!(path.exists());
             let content = std::fs::read_to_string(&path).unwrap();
@@ -351,7 +368,10 @@ mod tests {
             create_test_page(),
             PageLayout {
                 page_number: 2,
-                cards: vec![(Card::new(PathBuf::from("card4.jpg")), CardPosition { x: 5.0, y: 5.0 })],
+                cards: vec![(
+                    Card::new(PathBuf::from("card4.jpg")),
+                    CardPosition { x: 5.0, y: 5.0 },
+                )],
             },
         ];
 
@@ -379,7 +399,10 @@ mod tests {
             create_test_page(),
             PageLayout {
                 page_number: 2,
-                cards: vec![(Card::new(PathBuf::from("card4.jpg")), CardPosition { x: 10.0, y: 10.0 })],
+                cards: vec![(
+                    Card::new(PathBuf::from("card4.jpg")),
+                    CardPosition { x: 10.0, y: 10.0 },
+                )],
             },
         ];
 
