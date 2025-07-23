@@ -1,5 +1,5 @@
 use tcg_layout::layout::{calculate_grid, generate_positions};
-use tcg_layout::types::{LayoutParams, Margins, FillOrder};
+use tcg_layout::types::{LayoutParams, Margins, FillOrder, PageOrientation};
 
 fn main() {
     println!("TCG Card Layout Demo");
@@ -21,6 +21,7 @@ fn main() {
         margins: Margins::uniform(5.0),
         spacing: (2.0, 3.0),
         orientation: FillOrder::ColumnMajor,
+        page_orientation: PageOrientation::Portrait,
         target_dpi: 300,
     };
     demo_layout(custom_params, 8);
@@ -35,9 +36,25 @@ fn main() {
         margins: Margins::uniform(5.0),
         spacing: (1.0, 1.0),
         orientation: FillOrder::RowMajor,
+        page_orientation: PageOrientation::Portrait,
         target_dpi: 300,
     };
     demo_layout(tight_params, 12);
+    println!();
+
+    // Demo 4: Landscape orientation
+    println!("Demo 4: Landscape Layout (A4 landscape, Poker Cards, Row-Major)");
+    println!("---------------------------------------------------------------");
+    let landscape_params = LayoutParams {
+        page_size: (210.0, 297.0),  // A4 but will be used as landscape
+        card_size: (63.0, 88.0),    // Poker card
+        margins: Margins::uniform(10.0),
+        spacing: (2.0, 2.0),
+        orientation: FillOrder::RowMajor,
+        page_orientation: PageOrientation::Landscape,
+        target_dpi: 300,
+    };
+    demo_layout(landscape_params, 12);
 }
 
 fn demo_layout(params: LayoutParams, num_cards: usize) {
@@ -53,6 +70,7 @@ fn demo_layout(params: LayoutParams, num_cards: usize) {
              params.margins.bottom, params.margins.left);
     println!("  Spacing: {:.1} x {:.1} mm", params.spacing.0, params.spacing.1);
     println!("  Fill Order: {:?}", params.orientation);
+    println!("  Page Orientation: {:?}", params.page_orientation);
     println!();
 
     println!("Grid Calculation:");
@@ -72,8 +90,12 @@ fn demo_layout(params: LayoutParams, num_cards: usize) {
     }
     
     // Show available space utilization
-    let available_width = params.page_size.0 - params.margins.left - params.margins.right;
-    let available_height = params.page_size.1 - params.margins.top - params.margins.bottom;
+    let (page_width, page_height) = match params.page_orientation {
+        PageOrientation::Portrait => params.page_size,
+        PageOrientation::Landscape => (params.page_size.1, params.page_size.0),
+    };
+    let available_width = page_width - params.margins.left - params.margins.right;
+    let available_height = page_height - params.margins.top - params.margins.bottom;
     let used_width = grid.cols as f32 * params.card_size.0 + (grid.cols - 1) as f32 * params.spacing.0;
     let used_height = grid.rows as f32 * params.card_size.1 + (grid.rows - 1) as f32 * params.spacing.1;
     

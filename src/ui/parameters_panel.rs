@@ -1,5 +1,5 @@
 use eframe::egui;
-use crate::types::{LayoutParams, FillOrder};
+use crate::types::{LayoutParams, FillOrder, PageOrientation};
 use super::{PageSizeOption, CardSizeOption};
 
 pub fn show_parameters_panel(
@@ -56,6 +56,18 @@ pub fn show_parameters_panel(
                     });
                 }
             });
+            ui.end_row();
+
+            ui.label("Page Orientation:");
+            egui::ComboBox::from_id_source("page_orientation_combo")
+                .selected_text(match layout_params.page_orientation {
+                    PageOrientation::Portrait => "Portrait",
+                    PageOrientation::Landscape => "Landscape",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut layout_params.page_orientation, PageOrientation::Portrait, "Portrait");
+                    ui.selectable_value(&mut layout_params.page_orientation, PageOrientation::Landscape, "Landscape");
+                });
             ui.end_row();
 
             ui.label("Card Size:");

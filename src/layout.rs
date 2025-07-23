@@ -1,8 +1,14 @@
-use crate::types::{LayoutParams, GridLayout, Card, CardPosition, PageLayout, FillOrder};
+use crate::types::{LayoutParams, GridLayout, Card, CardPosition, PageLayout, FillOrder, PageOrientation};
 
 pub fn calculate_grid(params: &LayoutParams) -> GridLayout {
-    let available_width = params.page_size.0 - params.margins.left - params.margins.right;
-    let available_height = params.page_size.1 - params.margins.top - params.margins.bottom;
+    // Get effective page dimensions based on orientation
+    let (page_width, page_height) = match params.page_orientation {
+        PageOrientation::Portrait => params.page_size,
+        PageOrientation::Landscape => (params.page_size.1, params.page_size.0), // Swap width and height
+    };
+    
+    let available_width = page_width - params.margins.left - params.margins.right;
+    let available_height = page_height - params.margins.top - params.margins.bottom;
     
     let card_width_with_spacing = params.card_size.0 + params.spacing.0;
     let card_height_with_spacing = params.card_size.1 + params.spacing.1;
@@ -104,7 +110,7 @@ pub fn generate_positions(params: &LayoutParams, grid: &GridLayout) -> Vec<CardP
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{LayoutParams, Margins, FillOrder};
+    use crate::types::{LayoutParams, Margins, FillOrder, PageOrientation};
     use std::path::PathBuf;
 
     #[test]
@@ -129,6 +135,7 @@ mod tests {
             margins: Margins::uniform(5.0),
             spacing: (1.0, 1.0),
             orientation: FillOrder::RowMajor,
+            page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
         };
         
@@ -151,6 +158,7 @@ mod tests {
             margins: Margins::uniform(0.0),
             spacing: (0.0, 0.0),
             orientation: FillOrder::RowMajor,
+            page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
         };
         
@@ -223,6 +231,7 @@ mod tests {
             margins: Margins::uniform(5.0),
             spacing: (2.0, 3.0),
             orientation: FillOrder::RowMajor,
+            page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
         };
         
@@ -259,6 +268,7 @@ mod tests {
             margins: Margins::uniform(5.0),
             spacing: (2.0, 3.0),
             orientation: FillOrder::ColumnMajor,
+            page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
         };
         
@@ -299,5 +309,28 @@ mod tests {
         
         let positions = generate_positions(&params, &grid);
         assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn test_calculate_grid_landscape_orientation() {
+        let params = LayoutParams {
+            page_size: (210.0, 297.0), // A4 portrait
+            card_size: (63.0, 88.0),   // Poker card
+            margins: Margins::uniform(10.0),
+            spacing: (2.0, 2.0),
+            orientation: FillOrder::RowMajor,
+            page_orientation: PageOrientation::Landscape, // Landscape mode
+            target_dpi: 300,
+        };
+        
+        let grid = calculate_grid(&params);
+        
+        // In landscape, effective page size is 297x210mm (swapped)
+        // Available space: 277x190mm
+        // Cols: (277 + 2) / (63 + 2) = 279 / 65 = 4.29 -> 4
+        // Rows: (190 + 2) / (88 + 2) = 192 / 90 = 2.13 -> 2
+        assert_eq!(grid.cols, 4);
+        assert_eq!(grid.rows, 2);
+        assert_eq!(grid.cards_per_page, 8);
     }
 }

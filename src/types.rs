@@ -9,9 +9,21 @@ pub enum FillOrder {
     ColumnMajor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageOrientation {
+    Portrait,
+    Landscape,
+}
+
 impl Default for FillOrder {
     fn default() -> Self {
         FillOrder::RowMajor
+    }
+}
+
+impl Default for PageOrientation {
+    fn default() -> Self {
+        PageOrientation::Portrait
     }
 }
 
@@ -52,6 +64,7 @@ pub struct LayoutParams {
     pub margins: Margins,           // margins in mm
     pub spacing: (f32, f32),        // (horizontal, vertical) spacing in mm
     pub orientation: FillOrder,     // RowMajor vs ColumnMajor
+    pub page_orientation: PageOrientation, // Portrait vs Landscape
     pub target_dpi: u32,
 }
 
@@ -63,26 +76,81 @@ impl Default for LayoutParams {
             margins: Margins::uniform(10.0),
             spacing: (2.0, 2.0),
             orientation: FillOrder::RowMajor,
+            page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ThumbnailState {
+    NotLoaded,
+    Loading,
+    Loaded(ImageBuffer<image::Rgba<u8>, Vec<u8>>),
+    Failed(String),
+}
+
+impl Default for ThumbnailState {
+    fn default() -> Self {
+        ThumbnailState::NotLoaded
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Card {
     pub path: PathBuf,
-    pub thumbnail: Option<ImageBuffer<image::Rgba<u8>, Vec<u8>>>,
+    pub thumbnail_state: ThumbnailState,
     pub original_dpi: Option<u32>,
     pub needs_scaling: bool,
 }
 
 impl Card {
     pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            thumbnail: None,
+        let mut card = Self {
+            path: path.clone(),
+            thumbnail_state: ThumbnailState::NotLoaded,
             original_dpi: None,
             needs_scaling: false,
+        };
+        
+        // Only load DPI info synchronously (it's fast)
+        card.load_dpi_info();
+        
+        card
+    }
+    
+    pub fn set_thumbnail_loading(&mut self) {
+        self.thumbnail_state = ThumbnailState::Loading;
+    }
+    
+    pub fn set_thumbnail_loaded(&mut self, thumbnail: ImageBuffer<image::Rgba<u8>, Vec<u8>>) {
+        self.thumbnail_state = ThumbnailState::Loaded(thumbnail);
+    }
+    
+    pub fn set_thumbnail_failed(&mut self, error: String) {
+        self.thumbnail_state = ThumbnailState::Failed(error);
+    }
+    
+    pub fn get_thumbnail(&self) -> Option<&ImageBuffer<image::Rgba<u8>, Vec<u8>>> {
+        match &self.thumbnail_state {
+            ThumbnailState::Loaded(thumbnail) => Some(thumbnail),
+            _ => None,
+        }
+    }
+    
+    pub fn is_thumbnail_loaded(&self) -> bool {
+        matches!(self.thumbnail_state, ThumbnailState::Loaded(_))
+    }
+    
+    pub fn is_thumbnail_loading(&self) -> bool {
+        matches!(self.thumbnail_state, ThumbnailState::Loading)
+    }
+    
+    fn load_dpi_info(&mut self) {
+        self.original_dpi = super::image_processing::get_image_dpi(&self.path);
+        // Default to 72 DPI if not found in EXIF
+        if self.original_dpi.is_none() {
+            self.original_dpi = Some(72);
         }
     }
 }
@@ -154,6 +222,21 @@ mod tests {
     }
 
     #[test]
+    fn test_page_orientation_default() {
+        assert_eq!(PageOrientation::default(), PageOrientation::Portrait);
+    }
+
+    #[test]
+    fn test_page_orientation_variants() {
+        let portrait = PageOrientation::Portrait;
+        let landscape = PageOrientation::Landscape;
+        
+        assert_ne!(portrait, landscape);
+        assert_eq!(portrait, PageOrientation::Portrait);
+        assert_eq!(landscape, PageOrientation::Landscape);
+    }
+
+    #[test]
     fn test_margins_default() {
         let margins = Margins::default();
         assert_eq!(margins.top, 10.0);
@@ -195,6 +278,7 @@ mod tests {
         assert_eq!(params.margins, Margins::uniform(10.0));
         assert_eq!(params.spacing, (2.0, 2.0));
         assert_eq!(params.orientation, FillOrder::RowMajor);
+        assert_eq!(params.page_orientation, PageOrientation::Portrait);
         assert_eq!(params.target_dpi, 300);
     }
 
@@ -207,6 +291,7 @@ mod tests {
             margins: custom_margins,
             spacing: (1.0, 1.5),
             orientation: FillOrder::ColumnMajor,
+            page_orientation: PageOrientation::Landscape,
             target_dpi: 600,
         };
         
@@ -215,6 +300,7 @@ mod tests {
         assert_eq!(params.margins, custom_margins);
         assert_eq!(params.spacing, (1.0, 1.5));
         assert_eq!(params.orientation, FillOrder::ColumnMajor);
+        assert_eq!(params.page_orientation, PageOrientation::Landscape);
         assert_eq!(params.target_dpi, 600);
     }
 
@@ -224,8 +310,10 @@ mod tests {
         let card = Card::new(path.clone());
         
         assert_eq!(card.path, path);
-        assert!(card.thumbnail.is_none());
-        assert!(card.original_dpi.is_none());
+        // Thumbnail state will be NotLoaded initially
+        assert!(matches!(card.thumbnail_state, ThumbnailState::NotLoaded));
+        // DPI will be Some(72) because we default to 72 DPI when EXIF isn't available
+        assert_eq!(card.original_dpi, Some(72));
         assert!(!card.needs_scaling);
     }
 
@@ -240,6 +328,7 @@ mod tests {
         assert_eq!(card.path, path);
         assert_eq!(card.original_dpi, Some(150));
         assert!(card.needs_scaling);
+        assert!(matches!(card.thumbnail_state, ThumbnailState::NotLoaded));
     }
 
     #[test]
@@ -338,7 +427,7 @@ mod tests {
         let cloned = original.clone();
         
         assert_eq!(original.path, cloned.path);
-        assert_eq!(original.thumbnail.is_none(), cloned.thumbnail.is_none());
+        assert_eq!(original.thumbnail_state, cloned.thumbnail_state);
         assert_eq!(original.original_dpi, cloned.original_dpi);
         assert_eq!(original.needs_scaling, cloned.needs_scaling);
     }

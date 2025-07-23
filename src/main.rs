@@ -3,13 +3,18 @@
 pub mod types;
 pub mod layout;
 pub mod ui;
+pub mod image_processing;
+pub mod thumbnail_manager;
 
 use eframe::egui;
-use types::LayoutParams;
+use types::{LayoutParams, Card};
 use ui::{PageSizeOption, CardSizeOption};
 use ui::{parameters_panel, card_list_panel, preview_panel};
+use ui::preview_panel::PreviewState;
+use thumbnail_manager::{ThumbnailManager, ThumbnailMessage};
 
-fn main() -> Result<(), eframe::Error> {
+#[tokio::main]
+async fn main() -> Result<(), eframe::Error> {
     env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
 
     let options = eframe::NativeOptions {
@@ -32,6 +37,9 @@ struct TcgLayoutApp {
     success_message_timer: f32,
     page_size_option: PageSizeOption,
     card_size_option: CardSizeOption,
+    selected_cards: Vec<Card>,
+    preview_state: PreviewState,
+    thumbnail_manager: ThumbnailManager,
 }
 
 impl Default for TcgLayoutApp {
@@ -43,13 +51,97 @@ impl Default for TcgLayoutApp {
             success_message_timer: 0.0,
             page_size_option: PageSizeOption::A4,
             card_size_option: CardSizeOption::Poker,
+            selected_cards: Vec::new(),
+            preview_state: PreviewState::default(),
+            thumbnail_manager: ThumbnailManager::with_capacity(200), // Larger cache for better performance
         }
     }
 }
 
 
+impl TcgLayoutApp {
+    fn import_images(&mut self) {
+        let files = rfd::FileDialog::new()
+            .add_filter("Images", &["jpg", "jpeg", "png", "tiff", "tif"])
+            .set_title("Select Card Images")
+            .pick_files();
+
+        if let Some(paths) = files {
+            for path in paths {
+                let mut card = Card::new(path.clone());
+                
+                // Check if thumbnail is already cached
+                if let Some(thumbnail) = self.thumbnail_manager.request_thumbnail(path.clone()) {
+                    // Cache hit - set thumbnail immediately
+                    card.set_thumbnail_loaded(thumbnail);
+                } else {
+                    // Cache miss - set loading state and request async loading
+                    card.set_thumbnail_loading();
+                }
+                
+                self.selected_cards.push(card);
+            }
+            // Reset to first page when new cards are added
+            self.preview_state.reset_to_first_page();
+        }
+    }
+    
+    fn process_thumbnail_messages(&mut self) {
+        while let Some(message) = self.thumbnail_manager.try_recv_message() {
+            match message {
+                ThumbnailMessage::ThumbnailLoaded { path, result } => {
+                    // Find the card with this path and update its thumbnail
+                    if let Some(card) = self.selected_cards.iter_mut().find(|c| c.path == path) {
+                        match result {
+                            thumbnail_manager::ThumbnailResult::Success(thumbnail) => {
+                                card.set_thumbnail_loaded(thumbnail);
+                            }
+                            thumbnail_manager::ThumbnailResult::Error(error) => {
+                                card.set_thumbnail_failed(error);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn remove_card(&mut self, index: usize) {
+        if index < self.selected_cards.len() {
+            self.selected_cards.remove(index);
+            // Reset to first page when cards are removed
+            self.preview_state.reset_to_first_page();
+        }
+    }
+}
+
 impl eframe::App for TcgLayoutApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Process thumbnail messages from background loader
+        self.process_thumbnail_messages();
+        
+        // Request repaint if we have pending thumbnails to keep UI updating
+        if self.thumbnail_manager.has_pending_requests() {
+            ctx.request_repaint();
+        }
+        
+        // Menu bar
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Import Images...").clicked() {
+                        self.import_images();
+                        ui.close_menu();
+                    }
+                    if ui.button("Clear All").clicked() {
+                        self.selected_cards.clear();
+                        self.preview_state.reset_to_first_page();
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+
         // Handle success message timer
         if self.show_success_message {
             self.success_message_timer -= ctx.input(|i| i.unstable_dt);
@@ -58,14 +150,31 @@ impl eframe::App for TcgLayoutApp {
             }
         }
 
-        // Left pane - Card list (future)
+        // Left pane - Card list
+        let mut cards_to_remove = None;
+        let mut should_import = false;
         egui::SidePanel::left("card_list_panel")
             .resizable(true)
             .default_width(200.0)
             .width_range(150.0..=400.0)
             .show(ctx, |ui| {
-                card_list_panel::show_card_list_panel(ui);
+                card_list_panel::show_card_list_panel(
+                    ui, 
+                    &self.selected_cards,
+                    |index| cards_to_remove = Some(index),
+                    || should_import = true
+                );
             });
+        
+        // Handle card removal
+        if let Some(index) = cards_to_remove {
+            self.remove_card(index);
+        }
+        
+        // Handle import request
+        if should_import {
+            self.import_images();
+        }
 
         // Right pane - Parameters form
         egui::SidePanel::right("parameters_panel")
@@ -86,7 +195,12 @@ impl eframe::App for TcgLayoutApp {
 
         // Center pane - Preview
         egui::CentralPanel::default().show(ctx, |ui| {
-            preview_panel::show_preview_panel(ui);
+            preview_panel::show_preview_panel(
+                ui,
+                &self.layout_params,
+                &self.selected_cards,
+                &mut self.preview_state,
+            );
         });
 
         // Show success snackbar
