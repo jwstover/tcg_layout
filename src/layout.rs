@@ -31,8 +31,17 @@ pub fn calculate_grid(params: &LayoutParams) -> GridLayout {
 
 pub fn distribute_cards(cards: &[Card], grid: &GridLayout, params: &LayoutParams) -> Vec<PageLayout> {
     let mut pages = Vec::new();
-    let card_chunks = cards.chunks(grid.cards_per_page);
     let mut page_number = 1;
+    
+    // Expand cards based on copy count
+    let mut expanded_cards = Vec::new();
+    for card in cards {
+        for _ in 0..card.copy_count {
+            expanded_cards.push(card.clone());
+        }
+    }
+    
+    let card_chunks = expanded_cards.chunks(grid.cards_per_page);
     
     for chunk in card_chunks {
         let page_cards: Vec<(Card, CardPosition)> = chunk
@@ -332,5 +341,42 @@ mod tests {
         assert_eq!(grid.cols, 4);
         assert_eq!(grid.rows, 2);
         assert_eq!(grid.cards_per_page, 8);
+    }
+
+    #[test]
+    fn test_distribute_cards_with_copy_counts() {
+        let mut cards = vec![
+            Card::new(PathBuf::from("card1.jpg")),
+            Card::new(PathBuf::from("card2.jpg")),
+        ];
+        
+        // Set different copy counts
+        cards[0].set_copy_count(3); // 3 copies of card1
+        cards[1].set_copy_count(2); // 2 copies of card2
+        
+        let grid = GridLayout {
+            rows: 2,
+            cols: 2,
+            cards_per_page: 4,
+            total_pages: 2,
+        };
+        
+        let params = LayoutParams::default();
+        let pages = distribute_cards(&cards, &grid, &params);
+        
+        // Should have 5 total cards (3 + 2), which needs 2 pages (4 per page)
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].cards.len(), 4); // First page: full
+        assert_eq!(pages[1].cards.len(), 1); // Second page: 1 remaining
+        
+        // Verify the card distribution
+        // First page should have 3 copies of card1 + 1 copy of card2
+        assert_eq!(pages[0].cards[0].0.path, PathBuf::from("card1.jpg"));
+        assert_eq!(pages[0].cards[1].0.path, PathBuf::from("card1.jpg"));
+        assert_eq!(pages[0].cards[2].0.path, PathBuf::from("card1.jpg"));
+        assert_eq!(pages[0].cards[3].0.path, PathBuf::from("card2.jpg"));
+        
+        // Second page should have remaining copy of card2
+        assert_eq!(pages[1].cards[0].0.path, PathBuf::from("card2.jpg"));
     }
 }

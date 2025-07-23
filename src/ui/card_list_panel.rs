@@ -1,17 +1,19 @@
 use eframe::egui;
 use crate::types::Card;
 
-pub fn show_card_list_panel<F, I>(ui: &mut egui::Ui, cards: &[Card], mut remove_callback: F, mut import_callback: I) 
+pub fn show_card_list_panel<F, I, C>(ui: &mut egui::Ui, cards: &[Card], mut remove_callback: F, mut import_callback: I, mut copy_count_callback: C) 
 where
     F: FnMut(usize),
     I: FnMut(),
+    C: FnMut(usize, u32),
 {
     ui.heading("Card List");
     ui.separator();
     
-    // Show card count
+    // Show card count and total copies
     ui.horizontal(|ui| {
-        ui.label(format!("Cards: {}", cards.len()));
+        let total_copies: u32 = cards.iter().map(|card| card.copy_count).sum();
+        ui.label(format!("Cards: {} ({} copies)", cards.len(), total_copies));
         if ui.small_button("Import").clicked() {
             import_callback();
         }
@@ -32,11 +34,13 @@ where
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 let mut to_remove = None;
+                let mut copy_count_changes = Vec::new();
                 
                 for (index, card) in cards.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        // Card info
+                        // Card info and copy count controls
                         ui.vertical(|ui| {
+                            // Card filename
                             if let Some(filename) = card.path.file_name() {
                                 ui.label(filename.to_string_lossy().to_string());
                             } else {
@@ -46,10 +50,19 @@ where
                             // Show file path in smaller text
                             ui.small(card.path.to_string_lossy().to_string());
                             
-                            // Show DPI info if available
-                            if let Some(dpi) = card.original_dpi {
-                                ui.small(format!("DPI: {}", dpi));
-                            }
+                            // Copy count controls below the card info
+                            ui.horizontal(|ui| {
+                                ui.small("Copies:");
+                                if ui.small_button("−").clicked() {
+                                    let new_count = card.copy_count.saturating_sub(1).max(1);
+                                    copy_count_changes.push((index, new_count));
+                                }
+                                ui.small(format!("{}", card.copy_count));
+                                if ui.small_button("+").clicked() {
+                                    let new_count = card.copy_count + 1;
+                                    copy_count_changes.push((index, new_count));
+                                }
+                            });
                         });
                         
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -60,6 +73,11 @@ where
                     });
                     
                     ui.separator();
+                }
+                
+                // Handle copy count changes after iteration
+                for (index, new_count) in copy_count_changes {
+                    copy_count_callback(index, new_count);
                 }
                 
                 // Handle removal after iteration

@@ -5,6 +5,7 @@ pub mod layout;
 pub mod ui;
 pub mod image_processing;
 pub mod thumbnail_manager;
+pub mod svg_export;
 
 use eframe::egui;
 use types::{LayoutParams, Card};
@@ -12,6 +13,7 @@ use ui::{PageSizeOption, CardSizeOption};
 use ui::{parameters_panel, card_list_panel, preview_panel};
 use ui::preview_panel::PreviewState;
 use thumbnail_manager::{ThumbnailManager, ThumbnailMessage};
+use crate::svg_export::export_pages_to_single_svg;
 
 #[tokio::main]
 async fn main() -> Result<(), eframe::Error> {
@@ -113,6 +115,48 @@ impl TcgLayoutApp {
             self.preview_state.reset_to_first_page();
         }
     }
+
+    fn update_card_copy_count(&mut self, index: usize, new_count: u32) {
+        if index < self.selected_cards.len() {
+            self.selected_cards[index].set_copy_count(new_count);
+            // Reset to first page when copy counts change to refresh layout
+            self.preview_state.reset_to_first_page();
+        }
+    }
+
+    fn export_to_svg(&mut self) {
+        if self.selected_cards.is_empty() {
+            return;
+        }
+
+        // Show file save dialog
+        let output_file = rfd::FileDialog::new()
+            .set_title("Save SVG Layout")
+            .set_file_name("card_layout.svg")
+            .add_filter("SVG files", &["svg"])
+            .set_directory(".")
+            .save_file();
+
+        if let Some(output_path) = output_file {
+            // Calculate layout and distribute cards across pages
+            let grid = layout::calculate_grid(&self.layout_params);
+            let pages = layout::distribute_cards(&self.selected_cards, &grid, &self.layout_params);
+
+            // Export all pages to single SVG file
+            match export_pages_to_single_svg(&pages, &self.layout_params, &output_path) {
+                Ok(()) => {
+                    println!("Successfully exported {} pages to SVG: {:?}", pages.len(), output_path);
+                    // Show success message
+                    self.show_success_message = true;
+                    self.success_message_timer = 3.0;
+                }
+                Err(e) => {
+                    eprintln!("Failed to export SVG file: {}", e);
+                    // Could show error dialog here
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for TcgLayoutApp {
@@ -138,6 +182,11 @@ impl eframe::App for TcgLayoutApp {
                         self.preview_state.reset_to_first_page();
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui.button("Export to SVG...").clicked() {
+                        self.export_to_svg();
+                        ui.close_menu();
+                    }
                 });
             });
         });
@@ -153,6 +202,7 @@ impl eframe::App for TcgLayoutApp {
         // Left pane - Card list
         let mut cards_to_remove = None;
         let mut should_import = false;
+        let mut copy_count_changes = None;
         egui::SidePanel::left("card_list_panel")
             .resizable(true)
             .default_width(200.0)
@@ -162,13 +212,19 @@ impl eframe::App for TcgLayoutApp {
                     ui, 
                     &self.selected_cards,
                     |index| cards_to_remove = Some(index),
-                    || should_import = true
+                    || should_import = true,
+                    |index, new_count| copy_count_changes = Some((index, new_count))
                 );
             });
         
         // Handle card removal
         if let Some(index) = cards_to_remove {
             self.remove_card(index);
+        }
+        
+        // Handle copy count changes
+        if let Some((index, new_count)) = copy_count_changes {
+            self.update_card_copy_count(index, new_count);
         }
         
         // Handle import request

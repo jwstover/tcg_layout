@@ -102,6 +102,7 @@ pub struct Card {
     pub thumbnail_state: ThumbnailState,
     pub original_dpi: Option<u32>,
     pub needs_scaling: bool,
+    pub copy_count: u32,
 }
 
 impl Card {
@@ -111,6 +112,7 @@ impl Card {
             thumbnail_state: ThumbnailState::NotLoaded,
             original_dpi: None,
             needs_scaling: false,
+            copy_count: 1,
         };
         
         // Only load DPI info synchronously (it's fast)
@@ -144,6 +146,24 @@ impl Card {
     
     pub fn is_thumbnail_loading(&self) -> bool {
         matches!(self.thumbnail_state, ThumbnailState::Loading)
+    }
+    
+    pub fn set_copy_count(&mut self, count: u32) {
+        self.copy_count = count.max(1); // Ensure minimum of 1
+    }
+    
+    pub fn get_copy_count(&self) -> u32 {
+        self.copy_count
+    }
+    
+    pub fn increment_copy_count(&mut self) {
+        self.copy_count += 1;
+    }
+    
+    pub fn decrement_copy_count(&mut self) {
+        if self.copy_count > 1 {
+            self.copy_count -= 1;
+        }
     }
     
     fn load_dpi_info(&mut self) {
@@ -315,6 +335,7 @@ mod tests {
         // DPI will be Some(72) because we default to 72 DPI when EXIF isn't available
         assert_eq!(card.original_dpi, Some(72));
         assert!(!card.needs_scaling);
+        assert_eq!(card.copy_count, 1);
     }
 
     #[test]
@@ -329,6 +350,7 @@ mod tests {
         assert_eq!(card.original_dpi, Some(150));
         assert!(card.needs_scaling);
         assert!(matches!(card.thumbnail_state, ThumbnailState::NotLoaded));
+        assert_eq!(card.copy_count, 1);
     }
 
     #[test]
@@ -430,5 +452,34 @@ mod tests {
         assert_eq!(original.thumbnail_state, cloned.thumbnail_state);
         assert_eq!(original.original_dpi, cloned.original_dpi);
         assert_eq!(original.needs_scaling, cloned.needs_scaling);
+        assert_eq!(original.copy_count, cloned.copy_count);
+    }
+
+    #[test]
+    fn test_card_copy_count_methods() {
+        let mut card = Card::new(PathBuf::from("test.jpg"));
+        
+        // Test initial copy count
+        assert_eq!(card.get_copy_count(), 1);
+        
+        // Test increment
+        card.increment_copy_count();
+        assert_eq!(card.get_copy_count(), 2);
+        
+        // Test set copy count
+        card.set_copy_count(5);
+        assert_eq!(card.get_copy_count(), 5);
+        
+        // Test decrement
+        card.decrement_copy_count();
+        assert_eq!(card.get_copy_count(), 4);
+        
+        // Test minimum of 1
+        card.set_copy_count(0);
+        assert_eq!(card.get_copy_count(), 1);
+        
+        // Test decrement at minimum
+        card.decrement_copy_count();
+        assert_eq!(card.get_copy_count(), 1);
     }
 }
