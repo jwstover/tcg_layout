@@ -49,6 +49,7 @@ pub fn show_card_list_panel<F, I, C, R>(
     } else {
         // Scrollable list of cards
         egui::ScrollArea::vertical()
+            .id_source("card_list_scroll")
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 let mut to_remove = None;

@@ -1,4 +1,5 @@
 pub mod card_list_panel;
+pub mod decklist_panel;
 pub mod parameters_panel;
 pub mod preview_panel;
 

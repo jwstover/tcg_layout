@@ -1,5 +1,6 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
+pub mod decklist;
 pub mod image_processing;
 pub mod layout;
 pub mod svg_export;
@@ -8,12 +9,16 @@ pub mod types;
 pub mod ui;
 pub mod style;
 
+use crate::decklist::{DecklistEntry, DecklistManager, MatchedCard};
 use crate::svg_export::export_pages_to_single_svg;
 use eframe::egui;
+use std::sync::mpsc;
 use thumbnail_manager::{ThumbnailManager, ThumbnailMessage};
+use tokio::task::JoinHandle;
 use types::{Card, LayoutParams};
+use ui::decklist_panel::DecklistState;
 use ui::preview_panel::PreviewState;
-use ui::{card_list_panel, parameters_panel, preview_panel};
+use ui::{card_list_panel, decklist_panel, parameters_panel, preview_panel};
 use ui::{CardSizeOption, PageSizeOption};
 
 #[tokio::main]
@@ -32,6 +37,13 @@ async fn main() -> Result<(), eframe::Error> {
     )
 }
 
+#[derive(Debug)]
+pub enum AIMatchingMessage {
+    Started,
+    Completed { matches: Vec<MatchedCard> },
+    Failed { error: String },
+}
+
 struct TcgLayoutApp {
     layout_params: LayoutParams,
     validation_errors: Vec<String>,
@@ -42,6 +54,11 @@ struct TcgLayoutApp {
     selected_cards: Vec<Card>,
     preview_state: PreviewState,
     thumbnail_manager: ThumbnailManager,
+    decklist_state: DecklistState,
+    decklist_manager: DecklistManager,
+    show_decklist_tab: bool,
+    ai_matching_receiver: Option<mpsc::Receiver<AIMatchingMessage>>,
+    ai_matching_task: Option<JoinHandle<()>>,
 }
 
 impl Default for TcgLayoutApp {
@@ -56,6 +73,11 @@ impl Default for TcgLayoutApp {
             selected_cards: Vec::new(),
             preview_state: PreviewState::default(),
             thumbnail_manager: ThumbnailManager::with_capacity(200), // Larger cache for better performance
+            decklist_state: DecklistState::default(),
+            decklist_manager: DecklistManager::new(),
+            show_decklist_tab: false,
+            ai_matching_receiver: None,
+            ai_matching_task: None,
         }
     }
 }
@@ -189,6 +211,95 @@ impl TcgLayoutApp {
             }
         }
     }
+
+    fn apply_decklist(&mut self, matched_cards: &[MatchedCard]) {
+        match self.decklist_manager.apply_decklist_to_cards(matched_cards, &mut self.selected_cards) {
+            Ok(()) => {
+                // Reset to first page when cards are reordered
+                self.preview_state.reset_to_first_page();
+                // Update decklist state
+                self.decklist_state.success_message = Some("Decklist applied successfully!".to_string());
+                self.decklist_state.error_message = None;
+            }
+            Err(e) => {
+                self.decklist_state.error_message = Some(format!("Failed to apply decklist: {}", e));
+                self.decklist_state.success_message = None;
+            }
+        }
+    }
+
+    fn start_ai_matching(&mut self, api_key: String, entries: Vec<DecklistEntry>) {
+        // Cancel any existing task
+        if let Some(task) = self.ai_matching_task.take() {
+            task.abort();
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        self.ai_matching_receiver = Some(receiver);
+
+        let mut manager = DecklistManager::new();
+        manager.set_api_key(api_key);
+        let cards = self.selected_cards.clone();
+
+        // Spawn async task for AI matching
+        let task = tokio::spawn(async move {
+            let _ = sender.send(AIMatchingMessage::Started);
+            
+            match manager.match_cards_to_files(&entries, &cards).await {
+                Ok(matches) => {
+                    let _ = sender.send(AIMatchingMessage::Completed { matches });
+                }
+                Err(e) => {
+                    let _ = sender.send(AIMatchingMessage::Failed { 
+                        error: format!("AI matching failed: {}", e) 
+                    });
+                }
+            }
+        });
+
+        self.ai_matching_task = Some(task);
+        self.decklist_state.is_processing = true;
+    }
+
+    fn process_ai_matching_messages(&mut self) {
+        let mut messages_to_process = Vec::new();
+        
+        // Collect messages without holding a borrow on the receiver
+        if let Some(receiver) = &self.ai_matching_receiver {
+            while let Ok(message) = receiver.try_recv() {
+                messages_to_process.push(message);
+            }
+        }
+        
+        // Process messages
+        for message in messages_to_process {
+            match message {
+                AIMatchingMessage::Started => {
+                    self.decklist_state.is_processing = true;
+                    self.decklist_state.success_message = Some("Starting AI matching...".to_string());
+                    self.decklist_state.error_message = None;
+                }
+                AIMatchingMessage::Completed { matches } => {
+                    self.decklist_state.is_processing = false;
+                    self.decklist_state.matched_cards = matches;
+                    self.decklist_state.success_message = Some(format!(
+                        "AI matching completed! Found {} matches.", 
+                        self.decklist_state.matched_cards.len()
+                    ));
+                    self.decklist_state.show_results = true;
+                    self.ai_matching_receiver = None;
+                    self.ai_matching_task = None;
+                }
+                AIMatchingMessage::Failed { error } => {
+                    self.decklist_state.is_processing = false;
+                    self.decklist_state.error_message = Some(error);
+                    self.decklist_state.success_message = None;
+                    self.ai_matching_receiver = None;
+                    self.ai_matching_task = None;
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for TcgLayoutApp {
@@ -196,8 +307,11 @@ impl eframe::App for TcgLayoutApp {
         // Process thumbnail messages from background loader
         self.process_thumbnail_messages();
 
-        // Request repaint if we have pending thumbnails to keep UI updating
-        if self.thumbnail_manager.has_pending_requests() {
+        // Process AI matching messages
+        self.process_ai_matching_messages();
+
+        // Request repaint if we have pending thumbnails or AI matching to keep UI updating
+        if self.thumbnail_manager.has_pending_requests() || self.decklist_state.is_processing {
             ctx.request_repaint();
         }
 
@@ -233,24 +347,50 @@ impl eframe::App for TcgLayoutApp {
             }
         }
 
-        // Left pane - Card list
+        // Left pane - Card list and Decklist (tabbed)
         let mut cards_to_remove = None;
         let mut should_import = false;
         let mut copy_count_changes = None;
         let mut reorder_action = None;
-        egui::SidePanel::left("card_list_panel")
+        let mut decklist_matches_to_apply = None;
+        let mut start_ai_matching = None;
+        
+        egui::SidePanel::left("left_panel")
             .resizable(true)
-            .default_width(200.0)
-            .width_range(150.0..=400.0)
+            .default_width(300.0)
+            .width_range(250.0..=500.0)
             .show(ctx, |ui| {
-                card_list_panel::show_card_list_panel(
-                    ui,
-                    &self.selected_cards,
-                    |index| cards_to_remove = Some(index),
-                    || should_import = true,
-                    |index, new_count| copy_count_changes = Some((index, new_count)),
-                    |index, is_move_up| reorder_action = Some((index, is_move_up)),
-                );
+                // Tabs for Card List and Decklist
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.show_decklist_tab, false, "Card List");
+                    ui.selectable_value(&mut self.show_decklist_tab, true, "Decklist");
+                });
+                
+                ui.separator();
+                ui.add_space(8.0);
+                
+                if !self.show_decklist_tab {
+                    // Card List panel
+                    card_list_panel::show_card_list_panel(
+                        ui,
+                        &self.selected_cards,
+                        |index| cards_to_remove = Some(index),
+                        || should_import = true,
+                        |index, new_count| copy_count_changes = Some((index, new_count)),
+                        |index, is_move_up| reorder_action = Some((index, is_move_up)),
+                    );
+                } else {
+                    // Decklist panel
+                    decklist_panel::show_decklist_panel(
+                        ui,
+                        &mut self.decklist_state,
+                        |matched_cards| decklist_matches_to_apply = Some(matched_cards.to_vec()),
+                        |api_key, entries| {
+                            // Set up AI matching request
+                            start_ai_matching = Some((api_key.to_string(), entries.to_vec()));
+                        },
+                    );
+                }
             });
 
         // Handle card removal
@@ -275,6 +415,16 @@ impl eframe::App for TcgLayoutApp {
         // Handle import request
         if should_import {
             self.import_images();
+        }
+
+        // Handle decklist application
+        if let Some(matched_cards) = decklist_matches_to_apply {
+            self.apply_decklist(&matched_cards);
+        }
+
+        // Handle AI matching request
+        if let Some((api_key, entries)) = start_ai_matching {
+            self.start_ai_matching(api_key, entries);
         }
 
         // Right pane - Parameters form
