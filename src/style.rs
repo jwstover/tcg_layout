@@ -174,7 +174,7 @@ pub fn style() -> Style {
             slider_trailing_fill: false,
             ..Default::default()
         },
-        animation_time: 0.0833333358168602,
+        animation_time: 0.083_333_336,
         explanation_tooltips: false,
         ..Default::default()
     }

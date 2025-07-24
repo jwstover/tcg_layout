@@ -89,7 +89,7 @@ fn demo_layout(params: LayoutParams, num_cards: usize) {
     println!(
         "  Total pages needed for {} cards: {}",
         num_cards,
-        (num_cards + grid.cards_per_page - 1) / grid.cards_per_page
+        num_cards.div_ceil(grid.cards_per_page)
     );
     println!();
 
@@ -98,8 +98,7 @@ fn demo_layout(params: LayoutParams, num_cards: usize) {
     let cards_on_first_page = num_cards.min(grid.cards_per_page);
 
     println!(
-        "Card Positions (first page, {} cards):",
-        cards_on_first_page
+        "Card Positions (first page, {cards_on_first_page} cards):"
     );
     for (i, position) in positions.iter().enumerate().take(cards_on_first_page) {
         println!(
@@ -125,10 +124,9 @@ fn demo_layout(params: LayoutParams, num_cards: usize) {
     println!();
     println!("Space Utilization:");
     println!(
-        "  Available: {:.1} x {:.1} mm",
-        available_width, available_height
+        "  Available: {available_width:.1} x {available_height:.1} mm"
     );
-    println!("  Used: {:.1} x {:.1} mm", used_width, used_height);
+    println!("  Used: {used_width:.1} x {used_height:.1} mm");
     println!(
         "  Utilization: {:.1}% width, {:.1}% height",
         (used_width / available_width) * 100.0,

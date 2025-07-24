@@ -28,7 +28,7 @@ fn main() -> Result<()> {
             // Show DPI detection details
             let metadata_dpi = extract_dpi_from_metadata(image_path);
             match metadata_dpi {
-                Some(dpi) => println!("  DPI (from metadata): {}", dpi),
+                Some(dpi) => println!("  DPI (from metadata): {dpi}"),
                 None => {
                     println!("  DPI (from metadata): None found");
 
@@ -42,7 +42,7 @@ fn main() -> Result<()> {
                         );
 
                         if let Some(estimated_dpi) = metadata.dpi {
-                            println!("  DPI (estimated): {}", estimated_dpi);
+                            println!("  DPI (estimated): {estimated_dpi}");
                         }
                     } else {
                         println!("  Could not detect card type from aspect ratio");
@@ -53,7 +53,7 @@ fn main() -> Result<()> {
             println!("  Effective DPI: {}", metadata.effective_dpi());
         }
         Err(e) => {
-            eprintln!("Error loading image: {}", e);
+            eprintln!("Error loading image: {e}");
             std::process::exit(1);
         }
     }

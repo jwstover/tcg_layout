@@ -3,6 +3,7 @@
 pub mod decklist;
 pub mod image_processing;
 pub mod layout;
+pub mod settings;
 pub mod svg_export;
 pub mod thumbnail_manager;
 pub mod types;
@@ -10,6 +11,7 @@ pub mod ui;
 pub mod style;
 
 use crate::decklist::{DecklistEntry, DecklistManager, MatchedCard};
+use crate::settings::{AppSettings, SettingsManager};
 use crate::svg_export::export_pages_to_single_svg;
 use eframe::egui;
 use std::sync::mpsc;
@@ -59,30 +61,67 @@ struct TcgLayoutApp {
     show_decklist_tab: bool,
     ai_matching_receiver: Option<mpsc::Receiver<AIMatchingMessage>>,
     ai_matching_task: Option<JoinHandle<()>>,
+    settings_manager: SettingsManager,
 }
 
 impl Default for TcgLayoutApp {
     fn default() -> Self {
+        // Create settings manager
+        let settings_manager = SettingsManager::new()
+            .unwrap_or_else(|e| {
+                log::error!("Failed to create settings manager: {e}");
+                panic!("Cannot create settings manager: {e}");
+            });
+
+        // Load saved settings
+        let saved_settings = settings_manager.load_settings();
+
+        // Load API key from keyring and initialize decklist state
+        let api_key = settings_manager.load_openai_api_key().unwrap_or_default();
+        let decklist_state = DecklistState {
+            api_key,
+            ..Default::default()
+        };
+
         Self {
-            layout_params: LayoutParams::default(),
+            layout_params: saved_settings.layout_params,
             validation_errors: Vec::new(),
             show_success_message: false,
             success_message_timer: 0.0,
-            page_size_option: PageSizeOption::A4,
-            card_size_option: CardSizeOption::Poker,
+            page_size_option: saved_settings.page_size_option,
+            card_size_option: saved_settings.card_size_option,
             selected_cards: Vec::new(),
             preview_state: PreviewState::default(),
             thumbnail_manager: ThumbnailManager::with_capacity(200), // Larger cache for better performance
-            decklist_state: DecklistState::default(),
+            decklist_state,
             decklist_manager: DecklistManager::new(),
             show_decklist_tab: false,
             ai_matching_receiver: None,
             ai_matching_task: None,
+            settings_manager,
         }
     }
 }
 
 impl TcgLayoutApp {
+    fn save_settings(&self) {
+        let settings = AppSettings {
+            layout_params: self.layout_params.clone(),
+            page_size_option: self.page_size_option,
+            card_size_option: self.card_size_option,
+        };
+
+        if let Err(e) = self.settings_manager.save_settings(&settings) {
+            log::error!("Failed to save settings: {e}");
+        }
+    }
+
+    fn save_api_key(&self) {
+        if let Err(e) = self.settings_manager.save_openai_api_key(&self.decklist_state.api_key) {
+            log::error!("Failed to save API key: {e}");
+        }
+    }
+
     fn import_images(&mut self) {
         let files = rfd::FileDialog::new()
             .add_filter("Images", &["jpg", "jpeg", "png", "tiff", "tif"])
@@ -145,16 +184,6 @@ impl TcgLayoutApp {
         }
     }
 
-    fn move_card_to_position(&mut self, from_index: usize, to_index: usize) {
-        if from_index >= self.selected_cards.len() || to_index >= self.selected_cards.len() {
-            return;
-        }
-
-        if from_index != to_index {
-            let card = self.selected_cards.remove(from_index);
-            self.selected_cards.insert(to_index, card);
-        }
-    }
 
     fn swap_cards(&mut self, index1: usize, index2: usize) {
         if index1 < self.selected_cards.len() && index2 < self.selected_cards.len() && index1 != index2 {
@@ -205,7 +234,7 @@ impl TcgLayoutApp {
                     self.success_message_timer = 3.0;
                 }
                 Err(e) => {
-                    eprintln!("Failed to export SVG file: {}", e);
+                    eprintln!("Failed to export SVG file: {e}");
                     // Could show error dialog here
                 }
             }
@@ -222,7 +251,7 @@ impl TcgLayoutApp {
                 self.decklist_state.error_message = None;
             }
             Err(e) => {
-                self.decklist_state.error_message = Some(format!("Failed to apply decklist: {}", e));
+                self.decklist_state.error_message = Some(format!("Failed to apply decklist: {e}"));
                 self.decklist_state.success_message = None;
             }
         }
@@ -251,7 +280,7 @@ impl TcgLayoutApp {
                 }
                 Err(e) => {
                     let _ = sender.send(AIMatchingMessage::Failed { 
-                        error: format!("AI matching failed: {}", e) 
+                        error: format!("AI matching failed: {e}") 
                     });
                 }
             }
@@ -354,6 +383,7 @@ impl eframe::App for TcgLayoutApp {
         let mut reorder_action = None;
         let mut decklist_matches_to_apply = None;
         let mut start_ai_matching = None;
+        let mut api_key_changed = false;
         
         egui::SidePanel::left("left_panel")
             .resizable(true)
@@ -381,7 +411,7 @@ impl eframe::App for TcgLayoutApp {
                     );
                 } else {
                     // Decklist panel
-                    decklist_panel::show_decklist_panel(
+                    api_key_changed = decklist_panel::show_decklist_panel(
                         ui,
                         &mut self.decklist_state,
                         |matched_cards| decklist_matches_to_apply = Some(matched_cards.to_vec()),
@@ -427,8 +457,13 @@ impl eframe::App for TcgLayoutApp {
             self.start_ai_matching(api_key, entries);
         }
 
+        // Save API key if it changed
+        if api_key_changed {
+            self.save_api_key();
+        }
+
         // Right pane - Parameters form
-        egui::SidePanel::right("parameters_panel")
+        let settings_changed = egui::SidePanel::right("parameters_panel")
             .resizable(true)
             .default_width(300.0)
             .width_range(250.0..=500.0)
@@ -441,8 +476,13 @@ impl eframe::App for TcgLayoutApp {
                     &mut self.success_message_timer,
                     &mut self.page_size_option,
                     &mut self.card_size_option,
-                );
-            });
+                )
+            }).inner;
+
+        // Save settings if they changed
+        if settings_changed {
+            self.save_settings();
+        }
 
         // Center pane - Preview
         egui::CentralPanel::default().show(ctx, |ui| {

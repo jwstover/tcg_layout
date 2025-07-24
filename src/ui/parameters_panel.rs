@@ -11,7 +11,12 @@ pub fn show_parameters_panel(
     success_message_timer: &mut f32,
     page_size_option: &mut PageSizeOption,
     card_size_option: &mut CardSizeOption,
-) {
+) -> bool {
+    // Store original values to detect changes
+    let original_layout_params = layout_params.clone();
+    let original_page_size_option = *page_size_option;
+    let original_card_size_option = *card_size_option;
+
     ui.heading("Layout Parameters");
     ui.add_space(8.0);
 
@@ -221,12 +226,19 @@ pub fn show_parameters_panel(
     }
 
     ui.add_space(8.0);
-    if ui.button("Reset to Defaults").clicked() {
+    let reset_clicked = ui.button("Reset to Defaults").clicked();
+    if reset_clicked {
         *layout_params = LayoutParams::default();
         *page_size_option = PageSizeOption::A4;
         *card_size_option = CardSizeOption::Poker;
         validation_errors.clear();
     }
+
+    // Return true if any settings were changed
+    reset_clicked || 
+    *layout_params != original_layout_params || 
+    *page_size_option != original_page_size_option || 
+    *card_size_option != original_card_size_option
 }
 
 fn validate_params(

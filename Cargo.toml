@@ -22,6 +22,9 @@ svg = "0.14"  # SVG generation
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }  # HTTP client for AI calls
 serde = { version = "1.0", features = ["derive"] }  # JSON serialization
 serde_json = "1.0"  # JSON support
+keyring = "2.0"  # Secure credential storage
+dirs = "5.0"  # Standard user directories
+log = "0.4"  # Logging
 
 [dev-dependencies]
 tempfile = "3.8"  # For creating test files

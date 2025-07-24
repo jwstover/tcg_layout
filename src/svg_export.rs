@@ -49,9 +49,9 @@ impl SvgExporter {
 
         // Create SVG document with proper dimensions in mm
         let mut document = Document::new()
-            .set("width", format!("{}mm", page_width))
-            .set("height", format!("{}mm", page_height))
-            .set("viewBox", format!("0 0 {} {}", page_width, page_height))
+            .set("width", format!("{page_width}mm"))
+            .set("height", format!("{page_height}mm"))
+            .set("viewBox", format!("0 0 {page_width} {page_height}"))
             .set("xmlns", "http://www.w3.org/2000/svg")
             .set("xmlns:xlink", "http://www.w3.org/1999/xlink");
 
@@ -93,9 +93,9 @@ impl SvgExporter {
 
         // Create SVG document with height for all pages
         let mut document = Document::new()
-            .set("width", format!("{}mm", page_width))
-            .set("height", format!("{}mm", total_height))
-            .set("viewBox", format!("0 0 {} {}", page_width, total_height))
+            .set("width", format!("{page_width}mm"))
+            .set("height", format!("{total_height}mm"))
+            .set("viewBox", format!("0 0 {page_width} {total_height}"))
             .set("xmlns", "http://www.w3.org/2000/svg")
             .set("xmlns:xlink", "http://www.w3.org/1999/xlink");
 
@@ -109,7 +109,7 @@ impl SvgExporter {
 
             let mut page_group = Group::new()
                 .set("id", format!("page-{}", page.page_number))
-                .set("transform", format!("translate(0, {})", page_y_offset));
+                .set("transform", format!("translate(0, {page_y_offset})"));
 
             // Add background rectangle for this page
             let background = Rectangle::new()

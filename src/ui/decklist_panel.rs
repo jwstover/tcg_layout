@@ -34,10 +34,13 @@ pub fn show_decklist_panel<F, M>(
     decklist_state: &mut DecklistState,
     mut apply_decklist_callback: F,
     mut match_cards_callback: M,
-) where
+) -> bool
+where
     F: FnMut(&[MatchedCard]),
     M: FnMut(&str, &[DecklistEntry]),
 {
+    // Store original API key to detect changes
+    let original_api_key = decklist_state.api_key.clone();
     ui.heading("Decklist Import");
     ui.add_space(8.0);
     ui.separator();
@@ -116,7 +119,7 @@ pub fn show_decklist_panel<F, M>(
                         decklist_state.show_results = true;
                     }
                     Err(e) => {
-                        decklist_state.error_message = Some(format!("Failed to parse decklist: {}", e));
+                        decklist_state.error_message = Some(format!("Failed to parse decklist: {e}"));
                     }
                 }
             }
@@ -144,13 +147,13 @@ pub fn show_decklist_panel<F, M>(
 
     // Error message
     if let Some(error) = &decklist_state.error_message {
-        ui.colored_label(ui.visuals().error_fg_color, format!("❌ {}", error));
+        ui.colored_label(ui.visuals().error_fg_color, format!("❌ {error}"));
         ui.add_space(4.0);
     }
 
     // Success message
     if let Some(success) = &decklist_state.success_message {
-        ui.colored_label(egui::Color32::from_rgb(0, 150, 0), format!("✓ {}", success));
+        ui.colored_label(egui::Color32::from_rgb(0, 150, 0), format!("✓ {success}"));
         ui.add_space(4.0);
     }
 
@@ -242,4 +245,7 @@ pub fn show_decklist_panel<F, M>(
         ui.label("• Counterspell (3)");
         ui.label("• Plain card names (defaults to 1 copy)");
     });
+
+    // Return true if API key was changed
+    decklist_state.api_key != original_api_key
 }

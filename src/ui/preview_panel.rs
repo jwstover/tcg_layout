@@ -5,18 +5,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 
+#[derive(Default)]
 pub struct PreviewState {
     current_page: usize,
     texture_cache: HashMap<PathBuf, egui::TextureHandle>,
-}
-
-impl Default for PreviewState {
-    fn default() -> Self {
-        Self {
-            current_page: 0,
-            texture_cache: HashMap::new(),
-        }
-    }
 }
 
 impl PreviewState {
@@ -30,7 +22,7 @@ impl PreviewState {
         card: &Card,
     ) -> Option<&egui::TextureHandle> {
         if !self.texture_cache.contains_key(&card.path) {
-            if let Some(ref thumbnail) = card.get_thumbnail() {
+            if let Some(thumbnail) = card.get_thumbnail() {
                 let (width, height) = thumbnail.dimensions();
                 let pixels: Vec<egui::Color32> = thumbnail
                     .pixels()
@@ -233,7 +225,7 @@ pub fn show_preview_panel(
                 ui.separator();
                 ui.colored_label(
                     ui.visuals().text_color(),
-                    format!("Total cards: {}", cards.len()),
+                    format!("Total cards: {}", cards.iter().map(|card| card.copy_count).sum::<u32>()),
                 );
             });
         });

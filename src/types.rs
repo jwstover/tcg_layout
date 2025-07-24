@@ -3,31 +3,21 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use tokio::task::JoinHandle;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum FillOrder {
+    #[default]
     RowMajor,
     ColumnMajor,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum PageOrientation {
+    #[default]
     Portrait,
     Landscape,
 }
 
-impl Default for FillOrder {
-    fn default() -> Self {
-        FillOrder::RowMajor
-    }
-}
-
-impl Default for PageOrientation {
-    fn default() -> Self {
-        PageOrientation::Portrait
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Margins {
     pub top: f32,
     pub right: f32,
@@ -57,7 +47,7 @@ impl Margins {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayoutParams {
     pub page_size: (f32, f32),             // (width, height) in mm
     pub card_size: (f32, f32),             // (width, height) in mm
@@ -82,18 +72,13 @@ impl Default for LayoutParams {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ThumbnailState {
+    #[default]
     NotLoaded,
     Loading,
     Loaded(ImageBuffer<image::Rgba<u8>, Vec<u8>>),
     Failed(String),
-}
-
-impl Default for ThumbnailState {
-    fn default() -> Self {
-        ThumbnailState::NotLoaded
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -436,8 +421,10 @@ mod tests {
     fn test_layout_params_equality() {
         let params1 = LayoutParams::default();
         let params2 = LayoutParams::default();
-        let mut params3 = LayoutParams::default();
-        params3.target_dpi = 600;
+        let params3 = LayoutParams {
+            target_dpi: 600,
+            ..Default::default()
+        };
 
         assert_eq!(params1, params2);
         assert_ne!(params1, params3);

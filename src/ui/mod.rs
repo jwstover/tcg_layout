@@ -3,7 +3,7 @@ pub mod decklist_panel;
 pub mod parameters_panel;
 pub mod preview_panel;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PageSizeOption {
     A4,
     USLetter,
@@ -11,7 +11,7 @@ pub enum PageSizeOption {
     Custom,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CardSizeOption {
     Poker,
     Bridge,

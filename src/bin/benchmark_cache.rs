@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Rgb([r, g, b])
         });
 
-        let path = temp_dir.join(format!("card_{:03}.png", i));
+        let path = temp_dir.join(format!("card_{i:03}.png"));
         img.save(&path)?;
         image_paths.push(path);
     }
@@ -45,9 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let first_pass_time = start.elapsed();
     println!("First pass (cache building):");
-    println!("  Time: {:?}", first_pass_time);
-    println!("  Cache hits: {}", cache_hits);
-    println!("  Cache misses: {}", cache_misses);
+    println!("  Time: {first_pass_time:?}");
+    println!("  Cache hits: {cache_hits}");
+    println!("  Cache misses: {cache_misses}");
 
     // Wait for all thumbnails to be processed
     println!("Waiting for thumbnail processing...");
@@ -64,8 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!(
-        "Processed {} thumbnails in {} attempts",
-        processed_count, attempts
+        "Processed {processed_count} thumbnails in {attempts} attempts"
     );
 
     // Second pass - should be mostly cache hits
@@ -83,22 +82,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let second_pass_time = start.elapsed();
     println!("Second pass (cache utilization):");
-    println!("  Time: {:?}", second_pass_time);
-    println!("  Cache hits: {}", cache_hits);
-    println!("  Cache misses: {}", cache_misses);
+    println!("  Time: {second_pass_time:?}");
+    println!("  Cache hits: {cache_hits}");
+    println!("  Cache misses: {cache_misses}");
 
     // Performance improvement
     if first_pass_time.as_nanos() > 0 {
         let improvement =
             (first_pass_time.as_nanos() as f64) / (second_pass_time.as_nanos() as f64);
-        println!("  Speed improvement: {:.2}x", improvement);
+        println!("  Speed improvement: {improvement:.2}x");
     }
 
     // Cache statistics
     let (total_hits, total_misses, hit_rate) = manager.cache_stats();
     println!("Overall cache statistics:");
-    println!("  Total hits: {}", total_hits);
-    println!("  Total misses: {}", total_misses);
+    println!("  Total hits: {total_hits}");
+    println!("  Total misses: {total_misses}");
     println!("  Hit rate: {:.1}%", hit_rate * 100.0);
     println!(
         "  Cache size: {}/{}",

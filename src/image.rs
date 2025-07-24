@@ -210,11 +210,7 @@ pub fn estimate_dpi_from_dimensions(pixels: (u32, u32), card_dimensions: &CardDi
 
 pub fn estimate_dpi_with_fallback(dimensions: (u32, u32)) -> Option<u32> {
     // Try to detect card type by aspect ratio
-    if let Some(card_type) = detect_card_type_by_aspect_ratio(dimensions) {
-        Some(estimate_dpi_from_dimensions(dimensions, card_type))
-    } else {
-        None
-    }
+    detect_card_type_by_aspect_ratio(dimensions).map(|card_type| estimate_dpi_from_dimensions(dimensions, card_type))
 }
 
 pub fn load_image_metadata(path: &Path) -> Result<ImageMetadata> {
