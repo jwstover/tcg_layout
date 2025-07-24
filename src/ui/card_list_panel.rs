@@ -2,16 +2,18 @@ use crate::types::Card;
 use eframe::egui;
 
 
-pub fn show_card_list_panel<F, I, C>(
+pub fn show_card_list_panel<F, I, C, R>(
     ui: &mut egui::Ui,
     cards: &[Card],
     mut remove_callback: F,
     mut import_callback: I,
     mut copy_count_callback: C,
+    mut reorder_callback: R,
 ) where
     F: FnMut(usize),
     I: FnMut(),
     C: FnMut(usize, u32),
+    R: FnMut(usize, bool), // index, is_move_up
 {
     ui.heading("Card List");
     ui.add_space(8.0);
@@ -54,6 +56,26 @@ pub fn show_card_list_panel<F, I, C>(
 
                 for (index, card) in cards.iter().enumerate() {
                     ui.horizontal(|ui| {
+                        // Reorder controls on the left
+                        ui.vertical(|ui| {
+                            let up_enabled = index > 0;
+                            let down_enabled = index < cards.len() - 1;
+                            
+                            ui.add_enabled_ui(up_enabled, |ui| {
+                                if ui.small_button("▲").clicked() {
+                                    reorder_callback(index, true);
+                                }
+                            });
+                            
+                            ui.add_enabled_ui(down_enabled, |ui| {
+                                if ui.small_button("▼").clicked() {
+                                    reorder_callback(index, false);
+                                }
+                            });
+                        });
+
+                        ui.add_space(8.0);
+
                         // Card info and copy count controls
                         ui.vertical(|ui| {
                             // Card filename

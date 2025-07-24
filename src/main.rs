@@ -123,6 +123,35 @@ impl TcgLayoutApp {
         }
     }
 
+    fn move_card_to_position(&mut self, from_index: usize, to_index: usize) {
+        if from_index >= self.selected_cards.len() || to_index >= self.selected_cards.len() {
+            return;
+        }
+
+        if from_index != to_index {
+            let card = self.selected_cards.remove(from_index);
+            self.selected_cards.insert(to_index, card);
+        }
+    }
+
+    fn swap_cards(&mut self, index1: usize, index2: usize) {
+        if index1 < self.selected_cards.len() && index2 < self.selected_cards.len() && index1 != index2 {
+            self.selected_cards.swap(index1, index2);
+        }
+    }
+
+    fn move_card_up(&mut self, index: usize) {
+        if index > 0 && index < self.selected_cards.len() {
+            self.swap_cards(index, index - 1);
+        }
+    }
+
+    fn move_card_down(&mut self, index: usize) {
+        if index < self.selected_cards.len().saturating_sub(1) {
+            self.swap_cards(index, index + 1);
+        }
+    }
+
     fn export_to_svg(&mut self) {
         if self.selected_cards.is_empty() {
             return;
@@ -208,6 +237,7 @@ impl eframe::App for TcgLayoutApp {
         let mut cards_to_remove = None;
         let mut should_import = false;
         let mut copy_count_changes = None;
+        let mut reorder_action = None;
         egui::SidePanel::left("card_list_panel")
             .resizable(true)
             .default_width(200.0)
@@ -219,6 +249,7 @@ impl eframe::App for TcgLayoutApp {
                     |index| cards_to_remove = Some(index),
                     || should_import = true,
                     |index, new_count| copy_count_changes = Some((index, new_count)),
+                    |index, is_move_up| reorder_action = Some((index, is_move_up)),
                 );
             });
 
@@ -230,6 +261,15 @@ impl eframe::App for TcgLayoutApp {
         // Handle copy count changes
         if let Some((index, new_count)) = copy_count_changes {
             self.update_card_copy_count(index, new_count);
+        }
+
+        // Handle reorder actions
+        if let Some((index, is_move_up)) = reorder_action {
+            if is_move_up {
+                self.move_card_up(index);
+            } else {
+                self.move_card_down(index);
+            }
         }
 
         // Handle import request
