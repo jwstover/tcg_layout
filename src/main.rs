@@ -3,14 +3,16 @@
 pub mod decklist;
 pub mod image_processing;
 pub mod layout;
+pub mod pdf_export;
 pub mod settings;
+pub mod style;
 pub mod svg_export;
 pub mod thumbnail_manager;
 pub mod types;
 pub mod ui;
-pub mod style;
 
 use crate::decklist::{DecklistEntry, DecklistManager, MatchedCard};
+use crate::pdf_export::export_pages_to_pdf;
 use crate::settings::{AppSettings, SettingsManager};
 use crate::svg_export::export_pages_to_single_svg;
 use eframe::egui;
@@ -62,16 +64,17 @@ struct TcgLayoutApp {
     ai_matching_receiver: Option<mpsc::Receiver<AIMatchingMessage>>,
     ai_matching_task: Option<JoinHandle<()>>,
     settings_manager: SettingsManager,
+    previous_bleed_enabled: bool,
+    previous_bleed_mm: f32,
 }
 
 impl Default for TcgLayoutApp {
     fn default() -> Self {
         // Create settings manager
-        let settings_manager = SettingsManager::new()
-            .unwrap_or_else(|e| {
-                log::error!("Failed to create settings manager: {e}");
-                panic!("Cannot create settings manager: {e}");
-            });
+        let settings_manager = SettingsManager::new().unwrap_or_else(|e| {
+            log::error!("Failed to create settings manager: {e}");
+            panic!("Cannot create settings manager: {e}");
+        });
 
         // Load saved settings
         let saved_settings = settings_manager.load_settings();
@@ -84,7 +87,7 @@ impl Default for TcgLayoutApp {
         };
 
         Self {
-            layout_params: saved_settings.layout_params,
+            layout_params: saved_settings.layout_params.clone(),
             validation_errors: Vec::new(),
             show_success_message: false,
             success_message_timer: 0.0,
@@ -99,6 +102,8 @@ impl Default for TcgLayoutApp {
             ai_matching_receiver: None,
             ai_matching_task: None,
             settings_manager,
+            previous_bleed_enabled: saved_settings.layout_params.enable_bleed,
+            previous_bleed_mm: saved_settings.layout_params.bleed_mm,
         }
     }
 }
@@ -117,7 +122,10 @@ impl TcgLayoutApp {
     }
 
     fn save_api_key(&self) {
-        if let Err(e) = self.settings_manager.save_openai_api_key(&self.decklist_state.api_key) {
+        if let Err(e) = self
+            .settings_manager
+            .save_openai_api_key(&self.decklist_state.api_key)
+        {
             log::error!("Failed to save API key: {e}");
         }
     }
@@ -133,7 +141,12 @@ impl TcgLayoutApp {
                 let mut card = Card::new(path.clone());
 
                 // Check if thumbnail is already cached
-                if let Some(thumbnail) = self.thumbnail_manager.request_thumbnail(path.clone()) {
+                if let Some(thumbnail) = self.thumbnail_manager.request_thumbnail(
+                    path.clone(),
+                    self.layout_params.bleed_mm,
+                    self.layout_params.enable_bleed,
+                    self.layout_params.card_size,
+                ) {
                     // Cache hit - set thumbnail immediately
                     card.set_thumbnail_loaded(thumbnail);
                 } else {
@@ -151,7 +164,7 @@ impl TcgLayoutApp {
     fn process_thumbnail_messages(&mut self) {
         while let Some(message) = self.thumbnail_manager.try_recv_message() {
             match message {
-                ThumbnailMessage::ThumbnailLoaded { path, result } => {
+                ThumbnailMessage::ThumbnailLoaded { path, result, .. } => {
                     // Find the card with this path and update its thumbnail
                     if let Some(card) = self.selected_cards.iter_mut().find(|c| c.path == path) {
                         match result {
@@ -184,9 +197,11 @@ impl TcgLayoutApp {
         }
     }
 
-
     fn swap_cards(&mut self, index1: usize, index2: usize) {
-        if index1 < self.selected_cards.len() && index2 < self.selected_cards.len() && index1 != index2 {
+        if index1 < self.selected_cards.len()
+            && index2 < self.selected_cards.len()
+            && index1 != index2
+        {
             self.selected_cards.swap(index1, index2);
         }
     }
@@ -241,13 +256,50 @@ impl TcgLayoutApp {
         }
     }
 
+    fn export_to_pdf(&mut self) {
+        if self.selected_cards.is_empty() {
+            return;
+        }
+
+        let output_file = rfd::FileDialog::new()
+            .set_title("Save PDF Layout")
+            .set_file_name("card_layout.pdf")
+            .add_filter("PDF files", &["pdf"])
+            .set_directory(".")
+            .save_file();
+
+        if let Some(output_path) = output_file {
+            let grid = layout::calculate_grid(&self.layout_params);
+            let pages = layout::distribute_cards(&self.selected_cards, &grid, &self.layout_params);
+
+            match export_pages_to_pdf(&pages, &self.layout_params, &output_path) {
+                Ok(()) => {
+                    println!(
+                        "Successfully exported {} pages to PDF: {:?}",
+                        pages.len(),
+                        output_path
+                    );
+                    self.show_success_message = true;
+                    self.success_message_timer = 3.0;
+                }
+                Err(e) => {
+                    eprintln!("Failed to export PDF file: {e}");
+                }
+            }
+        }
+    }
+
     fn apply_decklist(&mut self, matched_cards: &[MatchedCard]) {
-        match self.decklist_manager.apply_decklist_to_cards(matched_cards, &mut self.selected_cards) {
+        match self
+            .decklist_manager
+            .apply_decklist_to_cards(matched_cards, &mut self.selected_cards)
+        {
             Ok(()) => {
                 // Reset to first page when cards are reordered
                 self.preview_state.reset_to_first_page();
                 // Update decklist state
-                self.decklist_state.success_message = Some("Decklist applied successfully!".to_string());
+                self.decklist_state.success_message =
+                    Some("Decklist applied successfully!".to_string());
                 self.decklist_state.error_message = None;
             }
             Err(e) => {
@@ -273,14 +325,14 @@ impl TcgLayoutApp {
         // Spawn async task for AI matching
         let task = tokio::spawn(async move {
             let _ = sender.send(AIMatchingMessage::Started);
-            
+
             match manager.match_cards_to_files(&entries, &cards).await {
                 Ok(matches) => {
                     let _ = sender.send(AIMatchingMessage::Completed { matches });
                 }
                 Err(e) => {
-                    let _ = sender.send(AIMatchingMessage::Failed { 
-                        error: format!("AI matching failed: {e}") 
+                    let _ = sender.send(AIMatchingMessage::Failed {
+                        error: format!("AI matching failed: {e}"),
                     });
                 }
             }
@@ -292,27 +344,28 @@ impl TcgLayoutApp {
 
     fn process_ai_matching_messages(&mut self) {
         let mut messages_to_process = Vec::new();
-        
+
         // Collect messages without holding a borrow on the receiver
         if let Some(receiver) = &self.ai_matching_receiver {
             while let Ok(message) = receiver.try_recv() {
                 messages_to_process.push(message);
             }
         }
-        
+
         // Process messages
         for message in messages_to_process {
             match message {
                 AIMatchingMessage::Started => {
                     self.decklist_state.is_processing = true;
-                    self.decklist_state.success_message = Some("Starting AI matching...".to_string());
+                    self.decklist_state.success_message =
+                        Some("Starting AI matching...".to_string());
                     self.decklist_state.error_message = None;
                 }
                 AIMatchingMessage::Completed { matches } => {
                     self.decklist_state.is_processing = false;
                     self.decklist_state.matched_cards = matches;
                     self.decklist_state.success_message = Some(format!(
-                        "AI matching completed! Found {} matches.", 
+                        "AI matching completed! Found {} matches.",
                         self.decklist_state.matched_cards.len()
                     ));
                     self.decklist_state.show_results = true;
@@ -364,6 +417,10 @@ impl eframe::App for TcgLayoutApp {
                         self.export_to_svg();
                         ui.close_menu();
                     }
+                    if ui.button("Export to PDF...").clicked() {
+                        self.export_to_pdf();
+                        ui.close_menu();
+                    }
                 });
             });
         });
@@ -384,21 +441,21 @@ impl eframe::App for TcgLayoutApp {
         let mut decklist_matches_to_apply = None;
         let mut start_ai_matching = None;
         let mut api_key_changed = false;
-        
+
         egui::SidePanel::left("left_panel")
             .resizable(true)
             .default_width(300.0)
-            .width_range(250.0..=500.0)
+            .width_range(250.0..=800.0)
             .show(ctx, |ui| {
                 // Tabs for Card List and Decklist
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.show_decklist_tab, false, "Card List");
                     ui.selectable_value(&mut self.show_decklist_tab, true, "Decklist");
                 });
-                
+
                 ui.separator();
                 ui.add_space(8.0);
-                
+
                 if !self.show_decklist_tab {
                     // Card List panel
                     card_list_panel::show_card_list_panel(
@@ -477,11 +534,42 @@ impl eframe::App for TcgLayoutApp {
                     &mut self.page_size_option,
                     &mut self.card_size_option,
                 )
-            }).inner;
+            })
+            .inner;
 
         // Save settings if they changed
         if settings_changed {
             self.save_settings();
+        }
+
+        // Check if bleed settings changed and re-request thumbnails if needed
+        let bleed_changed = self.layout_params.enable_bleed != self.previous_bleed_enabled
+            || (self.layout_params.bleed_mm - self.previous_bleed_mm).abs() > 0.01;
+
+        if bleed_changed {
+            // Clear texture cache to force regeneration of preview textures
+            self.preview_state.clear_texture_cache();
+
+            // Re-request all thumbnails with new bleed settings
+            for card in &mut self.selected_cards {
+                // Request new thumbnail with updated bleed settings
+                if let Some(thumbnail) = self.thumbnail_manager.request_thumbnail(
+                    card.path.clone(),
+                    self.layout_params.bleed_mm,
+                    self.layout_params.enable_bleed,
+                    self.layout_params.card_size,
+                ) {
+                    // Cache hit - set thumbnail immediately
+                    card.set_thumbnail_loaded(thumbnail);
+                } else {
+                    // Cache miss - set loading state and request async loading
+                    card.set_thumbnail_loading();
+                }
+            }
+
+            // Update tracked state
+            self.previous_bleed_enabled = self.layout_params.enable_bleed;
+            self.previous_bleed_mm = self.layout_params.bleed_mm;
         }
 
         // Center pane - Preview

@@ -1,7 +1,6 @@
 use crate::types::Card;
 use eframe::egui;
 
-
 pub fn show_card_list_panel<F, I, C, R>(
     ui: &mut egui::Ui,
     cards: &[Card],
@@ -49,8 +48,8 @@ pub fn show_card_list_panel<F, I, C, R>(
     } else {
         // Scrollable list of cards
         egui::ScrollArea::vertical()
-            .id_source("card_list_scroll")
-            .auto_shrink([false, true])
+            .id_salt("card_list_scroll")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 let mut to_remove = None;
                 let mut copy_count_changes = Vec::new();
@@ -61,13 +60,13 @@ pub fn show_card_list_panel<F, I, C, R>(
                         ui.vertical(|ui| {
                             let up_enabled = index > 0;
                             let down_enabled = index < cards.len() - 1;
-                            
+
                             ui.add_enabled_ui(up_enabled, |ui| {
                                 if ui.small_button("▲").clicked() {
                                     reorder_callback(index, true);
                                 }
                             });
-                            
+
                             ui.add_enabled_ui(down_enabled, |ui| {
                                 if ui.small_button("▼").clicked() {
                                     reorder_callback(index, false);

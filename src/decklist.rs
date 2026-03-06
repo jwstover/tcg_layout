@@ -73,19 +73,19 @@ impl DecklistManager {
     /// Parse decklist text into entries
     pub fn parse_decklist(&self, decklist_text: &str) -> Result<Vec<DecklistEntry>> {
         let mut entries = Vec::new();
-        
+
         for line in decklist_text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
                 continue; // Skip empty lines and comments
             }
-            
+
             // Try to parse different decklist formats:
             // Format 1: "4 Lightning Bolt"
-            // Format 2: "4x Lightning Bolt"  
+            // Format 2: "4x Lightning Bolt"
             // Format 3: "Lightning Bolt x4"
             // Format 4: "Lightning Bolt (4)"
-            
+
             let entry = if let Some((count_str, name)) = line.split_once(' ') {
                 // Format 1: "4 Lightning Bolt"
                 if let Ok(count) = count_str.parse::<u32>() {
@@ -110,12 +110,12 @@ impl DecklistManager {
             } else {
                 None
             };
-            
+
             if let Some(entry) = entry {
                 entries.push(entry);
                 continue;
             }
-            
+
             // Format 3: "Lightning Bolt x4"
             if let Some((name, count_part)) = line.rsplit_once(" x") {
                 if let Ok(count) = count_part.parse::<u32>() {
@@ -126,7 +126,7 @@ impl DecklistManager {
                     continue;
                 }
             }
-            
+
             // Format 4: "Lightning Bolt (4)"
             if line.ends_with(')') {
                 if let Some(open_paren) = line.rfind('(') {
@@ -141,14 +141,14 @@ impl DecklistManager {
                     }
                 }
             }
-            
+
             // If we can't parse count, assume 1 copy
             entries.push(DecklistEntry {
                 card_name: line.to_string(),
                 count: 1,
             });
         }
-        
+
         Ok(entries)
     }
 
@@ -165,7 +165,8 @@ impl DecklistManager {
         let filenames: Vec<String> = available_cards
             .iter()
             .filter_map(|card| {
-                card.path.file_stem()
+                card.path
+                    .file_stem()
                     .and_then(|stem| stem.to_str())
                     .map(|s| s.to_string())
             })
@@ -228,8 +229,13 @@ Only include matches where you're reasonably confident (confidence > 0.5). Use c
         let content = &openai_response.choices[0].message.content;
 
         // Parse the JSON response
-        let card_matching: CardMatching = serde_json::from_str(content)
-            .map_err(|e| anyhow!("Failed to parse AI response as JSON: {}. Response was: {}", e, content))?;
+        let card_matching: CardMatching = serde_json::from_str(content).map_err(|e| {
+            anyhow!(
+                "Failed to parse AI response as JSON: {}. Response was: {}",
+                e,
+                content
+            )
+        })?;
 
         // Convert to MatchedCard format
         let mut matched_cards = Vec::new();
@@ -242,7 +248,8 @@ Only include matches where you're reasonably confident (confidence > 0.5). Use c
             if let Some(&count) = entry_map.get(&card_match.card_name) {
                 // Find the actual path for this filename
                 if let Some(card) = available_cards.iter().find(|c| {
-                    c.path.file_stem()
+                    c.path
+                        .file_stem()
                         .and_then(|stem| stem.to_str())
                         .map(|s| s == card_match.filename)
                         .unwrap_or(false)
@@ -288,7 +295,10 @@ Only include matches where you're reasonably confident (confidence > 0.5). Use c
 
         // Sort matched cards by the order they appear in the decklist
         matched_card_objects.sort_by_key(|(matched, _)| {
-            matched_cards.iter().position(|mc| mc.card_name == matched.card_name).unwrap_or(usize::MAX)
+            matched_cards
+                .iter()
+                .position(|mc| mc.card_name == matched.card_name)
+                .unwrap_or(usize::MAX)
         });
 
         // Rebuild the cards vector: matched cards first, then unmatched
@@ -316,7 +326,7 @@ mod tests {
     fn test_parse_decklist_format_1() {
         let manager = DecklistManager::new();
         let decklist = "4 Lightning Bolt\n2 Shock\n1 Fireball";
-        
+
         let entries = manager.parse_decklist(decklist).unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].card_name, "Lightning Bolt");
@@ -329,7 +339,7 @@ mod tests {
     fn test_parse_decklist_format_2() {
         let manager = DecklistManager::new();
         let decklist = "4x Lightning Bolt\n2x Shock";
-        
+
         let entries = manager.parse_decklist(decklist).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].card_name, "Lightning Bolt");
@@ -340,7 +350,7 @@ mod tests {
     fn test_parse_decklist_format_3() {
         let manager = DecklistManager::new();
         let decklist = "Lightning Bolt x4\nShock x2";
-        
+
         let entries = manager.parse_decklist(decklist).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].card_name, "Lightning Bolt");
@@ -351,7 +361,7 @@ mod tests {
     fn test_parse_decklist_format_4() {
         let manager = DecklistManager::new();
         let decklist = "Lightning Bolt (4)\nShock (2)";
-        
+
         let entries = manager.parse_decklist(decklist).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].card_name, "Lightning Bolt");
@@ -362,7 +372,7 @@ mod tests {
     fn test_parse_decklist_mixed_formats() {
         let manager = DecklistManager::new();
         let decklist = "4 Lightning Bolt\n2x Shock\nFireball x1\nCounterspell (3)\nPlain Card Name";
-        
+
         let entries = manager.parse_decklist(decklist).unwrap();
         assert_eq!(entries.len(), 5);
         assert_eq!(entries[4].card_name, "Plain Card Name");
@@ -372,8 +382,9 @@ mod tests {
     #[test]
     fn test_parse_decklist_with_comments() {
         let manager = DecklistManager::new();
-        let decklist = "# This is a comment\n4 Lightning Bolt\n// Another comment\n2 Shock\n\n3 Fireball";
-        
+        let decklist =
+            "# This is a comment\n4 Lightning Bolt\n// Another comment\n2 Shock\n\n3 Fireball";
+
         let entries = manager.parse_decklist(decklist).unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].card_name, "Lightning Bolt");
@@ -402,8 +413,10 @@ mod tests {
             },
         ];
 
-        manager.apply_decklist_to_cards(&matched_cards, &mut cards).unwrap();
-        
+        manager
+            .apply_decklist_to_cards(&matched_cards, &mut cards)
+            .unwrap();
+
         // Cards should be reordered to match decklist order
         assert_eq!(cards[0].path, PathBuf::from("lightning_bolt.jpg"));
         assert_eq!(cards[0].copy_count, 4);

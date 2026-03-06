@@ -23,6 +23,9 @@ fn main() {
         orientation: FillOrder::ColumnMajor,
         page_orientation: PageOrientation::Portrait,
         target_dpi: 300,
+        bleed_mm: 0.0,
+        enable_bleed: false,
+        center_layout: false,
     };
     demo_layout(custom_params, 8);
     println!();
@@ -38,6 +41,9 @@ fn main() {
         orientation: FillOrder::RowMajor,
         page_orientation: PageOrientation::Portrait,
         target_dpi: 300,
+        bleed_mm: 0.0,
+        enable_bleed: false,
+        center_layout: false,
     };
     demo_layout(tight_params, 12);
     println!();
@@ -53,6 +59,9 @@ fn main() {
         orientation: FillOrder::RowMajor,
         page_orientation: PageOrientation::Landscape,
         target_dpi: 300,
+        bleed_mm: 0.0,
+        enable_bleed: false,
+        center_layout: false,
     };
     demo_layout(landscape_params, 12);
 }
@@ -97,9 +106,7 @@ fn demo_layout(params: LayoutParams, num_cards: usize) {
     let positions = generate_positions(&params, &grid);
     let cards_on_first_page = num_cards.min(grid.cards_per_page);
 
-    println!(
-        "Card Positions (first page, {cards_on_first_page} cards):"
-    );
+    println!("Card Positions (first page, {cards_on_first_page} cards):");
     for (i, position) in positions.iter().enumerate().take(cards_on_first_page) {
         println!(
             "  Card {}: ({:.1}, {:.1}) mm",
@@ -123,9 +130,7 @@ fn demo_layout(params: LayoutParams, num_cards: usize) {
 
     println!();
     println!("Space Utilization:");
-    println!(
-        "  Available: {available_width:.1} x {available_height:.1} mm"
-    );
+    println!("  Available: {available_width:.1} x {available_height:.1} mm");
     println!("  Used: {used_width:.1} x {used_height:.1} mm");
     println!(
         "  Utilization: {:.1}% width, {:.1}% height",

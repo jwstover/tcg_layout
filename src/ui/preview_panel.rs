@@ -1,9 +1,8 @@
-use crate::layout::{calculate_grid, distribute_cards};
+use crate::layout::{calculate_cut_marks, calculate_grid, distribute_cards};
 use crate::types::{Card, LayoutParams, PageOrientation, ThumbnailState};
 use eframe::egui;
 use std::collections::HashMap;
 use std::path::PathBuf;
-
 
 #[derive(Default)]
 pub struct PreviewState {
@@ -14,6 +13,10 @@ pub struct PreviewState {
 impl PreviewState {
     pub fn reset_to_first_page(&mut self) {
         self.current_page = 0;
+    }
+
+    pub fn clear_texture_cache(&mut self) {
+        self.texture_cache.clear();
     }
 
     fn get_or_create_texture(
@@ -146,15 +149,43 @@ pub fn show_preview_panel(
         egui::Stroke::new(2.0, ui.visuals().text_color()),
     );
 
+    // Draw cut marks
+    let cut_marks = calculate_cut_marks(layout_params, &grid);
+    for cut_mark in &cut_marks {
+        let x1 = center_x + (cut_mark.x1 * 3.0 * scale);
+        let y1 = center_y + (cut_mark.y1 * 3.0 * scale);
+        let x2 = center_x + (cut_mark.x2 * 3.0 * scale);
+        let y2 = center_y + (cut_mark.y2 * 3.0 * scale);
+
+        ui.painter().line_segment(
+            [egui::pos2(x1, y1), egui::pos2(x2, y2)],
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(128, 128, 128)), // Gray cut marks
+        );
+    }
+
     // Draw cards for current page
     let current_page = &pages[preview_state.current_page];
 
     for (card, position) in &current_page.cards {
-        // Convert card position from mm to preview coordinates
-        let card_x = center_x + (position.x * 3.0 * scale);
-        let card_y = center_y + (position.y * 3.0 * scale);
-        let card_width = layout_params.card_size.0 * 3.0 * scale;
-        let card_height = layout_params.card_size.1 * 3.0 * scale;
+        // Calculate card dimensions and position based on bleed setting
+        let (card_x, card_y, card_width, card_height) =
+            if layout_params.enable_bleed && layout_params.bleed_mm > 0.0 {
+                // With bleed: draw larger image offset by -bleed_mm to match SVG export
+                let bleed_width =
+                    (layout_params.card_size.0 + 2.0 * layout_params.bleed_mm) * 3.0 * scale;
+                let bleed_height =
+                    (layout_params.card_size.1 + 2.0 * layout_params.bleed_mm) * 3.0 * scale;
+                let offset_x = center_x + ((position.x - layout_params.bleed_mm) * 3.0 * scale);
+                let offset_y = center_y + ((position.y - layout_params.bleed_mm) * 3.0 * scale);
+                (offset_x, offset_y, bleed_width, bleed_height)
+            } else {
+                // Without bleed: draw at card_size
+                let x = center_x + (position.x * 3.0 * scale);
+                let y = center_y + (position.y * 3.0 * scale);
+                let w = layout_params.card_size.0 * 3.0 * scale;
+                let h = layout_params.card_size.1 * 3.0 * scale;
+                (x, y, w, h)
+            };
 
         let card_rect = egui::Rect::from_min_size(
             egui::pos2(card_x, card_y),
@@ -182,12 +213,7 @@ pub fn show_preview_panel(
                     );
                 } else {
                     // Fallback if texture creation failed
-                    draw_placeholder_card(
-                        ui,
-                        card_rect,
-                        card,
-                        ui.visuals().faint_bg_color,
-                    );
+                    draw_placeholder_card(ui, card_rect, card, ui.visuals().faint_bg_color);
                 }
             }
             ThumbnailState::Loading => {
@@ -225,7 +251,10 @@ pub fn show_preview_panel(
                 ui.separator();
                 ui.colored_label(
                     ui.visuals().text_color(),
-                    format!("Total cards: {}", cards.iter().map(|card| card.copy_count).sum::<u32>()),
+                    format!(
+                        "Total cards: {}",
+                        cards.iter().map(|card| card.copy_count).sum::<u32>()
+                    ),
                 );
             });
         });

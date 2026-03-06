@@ -2,7 +2,6 @@ use super::{CardSizeOption, PageSizeOption};
 use crate::types::{FillOrder, LayoutParams, PageOrientation};
 use eframe::egui;
 
-
 pub fn show_parameters_panel(
     ui: &mut egui::Ui,
     layout_params: &mut LayoutParams,
@@ -29,7 +28,7 @@ pub fn show_parameters_panel(
         .show(ui, |ui| {
             ui.label("Page Size:");
             ui.vertical(|ui| {
-                egui::ComboBox::from_id_source("page_size_combo")
+                egui::ComboBox::from_id_salt("page_size_combo")
                     .selected_text(page_size_option.display_name())
                     .show_ui(ui, |ui| {
                         if ui.selectable_value(page_size_option, PageSizeOption::A4, PageSizeOption::A4.display_name()).clicked() {
@@ -67,7 +66,7 @@ pub fn show_parameters_panel(
             ui.end_row();
 
             ui.label("Page Orientation:");
-            egui::ComboBox::from_id_source("page_orientation_combo")
+            egui::ComboBox::from_id_salt("page_orientation_combo")
                 .selected_text(match layout_params.page_orientation {
                     PageOrientation::Portrait => "Portrait",
                     PageOrientation::Landscape => "Landscape",
@@ -80,7 +79,7 @@ pub fn show_parameters_panel(
 
             ui.label("Card Size:");
             ui.vertical(|ui| {
-                egui::ComboBox::from_id_source("card_size_combo")
+                egui::ComboBox::from_id_salt("card_size_combo")
                     .selected_text(card_size_option.display_name())
                     .show_ui(ui, |ui| {
                         if ui.selectable_value(card_size_option, CardSizeOption::Poker, CardSizeOption::Poker.display_name()).clicked() {
@@ -119,30 +118,62 @@ pub fn show_parameters_panel(
 
             ui.label("Margins (mm):");
             ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Top:");
-                    ui.add(egui::DragValue::new(&mut layout_params.margins.top)
-                        .speed(0.1)
-                        .range(0.0..=100.0)
-                        .suffix(" mm"));
-                    ui.label("Right:");
-                    ui.add(egui::DragValue::new(&mut layout_params.margins.right)
-                        .speed(0.1)
-                        .range(0.0..=100.0)
-                        .suffix(" mm"));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Bottom:");
-                    ui.add(egui::DragValue::new(&mut layout_params.margins.bottom)
-                        .speed(0.1)
-                        .range(0.0..=100.0)
-                        .suffix(" mm"));
-                    ui.label("Left:");
-                    ui.add(egui::DragValue::new(&mut layout_params.margins.left)
-                        .speed(0.1)
-                        .range(0.0..=100.0)
-                        .suffix(" mm"));
-                });
+                if layout_params.center_layout {
+                    // Calculate and display centered margins (read-only)
+                    let grid = crate::layout::calculate_grid(layout_params);
+                    let effective_margins = layout_params.effective_margins(&grid);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Top:");
+                        ui.colored_label(
+                            ui.visuals().weak_text_color(),
+                            format!("{:.1} mm (auto)", effective_margins.top)
+                        );
+                        ui.label("Right:");
+                        ui.colored_label(
+                            ui.visuals().weak_text_color(),
+                            format!("{:.1} mm (auto)", effective_margins.right)
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Bottom:");
+                        ui.colored_label(
+                            ui.visuals().weak_text_color(),
+                            format!("{:.1} mm (auto)", effective_margins.bottom)
+                        );
+                        ui.label("Left:");
+                        ui.colored_label(
+                            ui.visuals().weak_text_color(),
+                            format!("{:.1} mm (auto)", effective_margins.left)
+                        );
+                    });
+                } else {
+                    // Existing editable margin controls
+                    ui.horizontal(|ui| {
+                        ui.label("Top:");
+                        ui.add(egui::DragValue::new(&mut layout_params.margins.top)
+                            .speed(0.1)
+                            .range(0.0..=100.0)
+                            .suffix(" mm"));
+                        ui.label("Right:");
+                        ui.add(egui::DragValue::new(&mut layout_params.margins.right)
+                            .speed(0.1)
+                            .range(0.0..=100.0)
+                            .suffix(" mm"));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Bottom:");
+                        ui.add(egui::DragValue::new(&mut layout_params.margins.bottom)
+                            .speed(0.1)
+                            .range(0.0..=100.0)
+                            .suffix(" mm"));
+                        ui.label("Left:");
+                        ui.add(egui::DragValue::new(&mut layout_params.margins.left)
+                            .speed(0.1)
+                            .range(0.0..=100.0)
+                            .suffix(" mm"));
+                    });
+                }
             });
             ui.end_row();
 
@@ -167,7 +198,7 @@ pub fn show_parameters_panel(
                     "Determines how cards are arranged:\n• Row Major: Fill left to right, then down\n• Column Major: Fill top to bottom, then right"
                 );
             });
-            egui::ComboBox::from_id_source("fill_order_combo")
+            egui::ComboBox::from_id_salt("fill_order_combo")
                 .selected_text(match layout_params.orientation {
                     FillOrder::RowMajor => "Row Major (left to right, then down)",
                     FillOrder::ColumnMajor => "Column Major (top to bottom, then right)",
@@ -176,6 +207,15 @@ pub fn show_parameters_panel(
                     ui.selectable_value(&mut layout_params.orientation, FillOrder::RowMajor, "Row Major (left to right, then down)");
                     ui.selectable_value(&mut layout_params.orientation, FillOrder::ColumnMajor, "Column Major (top to bottom, then right)");
                 });
+            ui.end_row();
+
+            ui.horizontal(|ui| {
+                ui.label("Center Layout:");
+                ui.colored_label(ui.visuals().weak_text_color(), "(?)").on_hover_text(
+                    "Automatically center the card grid on the page.\nWhen enabled, margins are calculated to center the layout."
+                );
+            });
+            ui.checkbox(&mut layout_params.center_layout, "Center on page");
             ui.end_row();
 
             ui.horizontal(|ui| {
@@ -188,6 +228,28 @@ pub fn show_parameters_panel(
                 .speed(10)
                 .range(72..=600));
             ui.end_row();
+
+            // Bleed section
+            ui.horizontal(|ui| {
+                ui.label("Print Bleed:");
+                ui.colored_label(ui.visuals().weak_text_color(), "(?)").on_hover_text(
+                    "Extends card images beyond edges for professional printing.\n\
+                     Recommended: 3mm for most print shops.\n\
+                     Bleed is visible in preview and saved as separate files during export."
+                );
+            });
+            ui.checkbox(&mut layout_params.enable_bleed, "Enable bleed");
+            ui.end_row();
+
+            // Only show bleed amount if enabled
+            if layout_params.enable_bleed {
+                ui.label("Bleed Amount:");
+                ui.add(egui::DragValue::new(&mut layout_params.bleed_mm)
+                    .speed(0.1)
+                    .range(0.0..=10.0)
+                    .suffix(" mm"));
+                ui.end_row();
+            }
         });
 
     ui.add_space(8.0);
@@ -235,10 +297,10 @@ pub fn show_parameters_panel(
     }
 
     // Return true if any settings were changed
-    reset_clicked || 
-    *layout_params != original_layout_params || 
-    *page_size_option != original_page_size_option || 
-    *card_size_option != original_card_size_option
+    reset_clicked
+        || *layout_params != original_layout_params
+        || *page_size_option != original_page_size_option
+        || *card_size_option != original_card_size_option
 }
 
 fn validate_params(
@@ -265,14 +327,32 @@ fn validate_params(
         validation_errors.push("Target DPI must be greater than 0".to_string());
     }
 
-    let total_margin_width = layout_params.margins.left + layout_params.margins.right;
-    let total_margin_height = layout_params.margins.top + layout_params.margins.bottom;
+    if layout_params.enable_bleed && layout_params.bleed_mm < 0.0 {
+        validation_errors.push("Bleed amount cannot be negative".to_string());
+    }
 
-    if layout_params.card_size.0 + total_margin_width >= layout_params.page_size.0 {
+    if layout_params.enable_bleed && layout_params.bleed_mm > 10.0 {
+        validation_errors.push("Bleed amount exceeds maximum (10mm)".to_string());
+    }
+
+    // Calculate effective margins for validation
+    let grid = crate::layout::calculate_grid(layout_params);
+    let effective_margins = layout_params.effective_margins(&grid);
+
+    let total_margin_width = effective_margins.left + effective_margins.right;
+    let total_margin_height = effective_margins.top + effective_margins.bottom;
+
+    // Get page dimensions considering orientation
+    let (page_width, page_height) = match layout_params.page_orientation {
+        PageOrientation::Portrait => layout_params.page_size,
+        PageOrientation::Landscape => (layout_params.page_size.1, layout_params.page_size.0),
+    };
+
+    if layout_params.card_size.0 + total_margin_width >= page_width {
         validation_errors.push("Card width plus margins exceeds page width".to_string());
     }
 
-    if layout_params.card_size.1 + total_margin_height >= layout_params.page_size.1 {
+    if layout_params.card_size.1 + total_margin_height >= page_height {
         validation_errors.push("Card height plus margins exceeds page height".to_string());
     }
 

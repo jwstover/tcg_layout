@@ -3,6 +3,14 @@
 ## Project Overview
 Desktop application that automatically lays out Trading Card Game (TCG) card images on printable pages. Built in Rust for cross-platform compatibility with focus on macOS development.
 
+## Development workflow
+
+1. Plan steps to implement new feature / bugfix
+2. Implemnt changes
+3. Run tests
+4. Ensure that `cargo clippy` doesn't raise any warnings. **Fix all warnings**
+5. Ensure that `cargo fmt` doesn't raise any errors
+
 ## Development Environment
 
 ### Build Commands
@@ -177,13 +185,6 @@ cargo test --bin layout_demo # Binary tests
 - UI parameter validation
 - Image metadata extraction
 - Thumbnail caching behavior
-
-## Development workflow
-
-1. Plan steps to implement new feature / bugfix
-2. Implemnt changes
-3. Run tests
-4. Come up with commit message and prompt for confirmation before committing
 
 ## Common Development Tasks
 

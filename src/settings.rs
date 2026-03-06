@@ -191,9 +191,18 @@ mod tests {
         let settings = AppSettings::default();
         let json = serde_json::to_string(&settings).unwrap();
         let deserialized: AppSettings = serde_json::from_str(&json).unwrap();
-        
-        assert_eq!(settings.layout_params.page_size, deserialized.layout_params.page_size);
-        assert_eq!(settings.layout_params.card_size, deserialized.layout_params.card_size);
-        assert_eq!(settings.layout_params.target_dpi, deserialized.layout_params.target_dpi);
+
+        assert_eq!(
+            settings.layout_params.page_size,
+            deserialized.layout_params.page_size
+        );
+        assert_eq!(
+            settings.layout_params.card_size,
+            deserialized.layout_params.card_size
+        );
+        assert_eq!(
+            settings.layout_params.target_dpi,
+            deserialized.layout_params.target_dpi
+        );
     }
 }

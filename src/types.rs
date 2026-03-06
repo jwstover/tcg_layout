@@ -56,6 +56,9 @@ pub struct LayoutParams {
     pub orientation: FillOrder,            // RowMajor vs ColumnMajor
     pub page_orientation: PageOrientation, // Portrait vs Landscape
     pub target_dpi: u32,
+    pub bleed_mm: f32,       // Bleed amount in millimeters
+    pub enable_bleed: bool,  // Whether bleed is enabled
+    pub center_layout: bool, // Whether to center the layout on the page
 }
 
 impl Default for LayoutParams {
@@ -68,6 +71,43 @@ impl Default for LayoutParams {
             orientation: FillOrder::RowMajor,
             page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
+            bleed_mm: 3.0,        // Standard print bleed
+            enable_bleed: false,  // Disabled by default
+            center_layout: false, // Disabled by default
+        }
+    }
+}
+
+impl LayoutParams {
+    /// Calculate effective margins based on centering mode
+    /// When centering is enabled, returns calculated centered margins
+    /// When centering is disabled, returns user-specified margins
+    pub fn effective_margins(&self, grid: &GridLayout) -> Margins {
+        if !self.center_layout {
+            return self.margins;
+        }
+
+        // Calculate actual grid dimensions
+        let grid_width = grid.cols as f32 * self.card_size.0
+            + grid.cols.saturating_sub(1) as f32 * self.spacing.0;
+        let grid_height = grid.rows as f32 * self.card_size.1
+            + grid.rows.saturating_sub(1) as f32 * self.spacing.1;
+
+        // Get page dimensions considering orientation
+        let (page_width, page_height) = match self.page_orientation {
+            PageOrientation::Portrait => self.page_size,
+            PageOrientation::Landscape => (self.page_size.1, self.page_size.0),
+        };
+
+        // Calculate centered margins (split remaining space equally)
+        let margin_h = ((page_width - grid_width) / 2.0).max(0.0);
+        let margin_v = ((page_height - grid_height) / 2.0).max(0.0);
+
+        Margins {
+            left: margin_h,
+            right: margin_h,
+            top: margin_v,
+            bottom: margin_v,
         }
     }
 }
@@ -207,6 +247,21 @@ pub struct DpiWarning {
     pub message: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct CutMark {
+    pub x1: f32, // start x position in mm
+    pub y1: f32, // start y position in mm
+    pub x2: f32, // end x position in mm
+    pub y2: f32, // end y position in mm
+    pub mark_type: CutMarkType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CutMarkType {
+    Horizontal, // cuts between rows
+    Vertical,   // cuts between columns
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +353,9 @@ mod tests {
             orientation: FillOrder::ColumnMajor,
             page_orientation: PageOrientation::Landscape,
             target_dpi: 600,
+            bleed_mm: 0.0,
+            enable_bleed: false,
+            center_layout: false,
         };
 
         assert_eq!(params.page_size, (100.0, 150.0));
@@ -468,5 +526,147 @@ mod tests {
         // Test decrement at minimum
         card.decrement_copy_count();
         assert_eq!(card.get_copy_count(), 1);
+    }
+
+    #[test]
+    fn test_layout_params_with_bleed() {
+        let params = LayoutParams {
+            bleed_mm: 3.0,
+            enable_bleed: true,
+            ..Default::default()
+        };
+        assert_eq!(params.bleed_mm, 3.0);
+        assert!(params.enable_bleed);
+    }
+
+    #[test]
+    fn test_effective_margins_without_centering() {
+        let params = LayoutParams {
+            margins: Margins {
+                top: 5.0,
+                right: 10.0,
+                bottom: 15.0,
+                left: 20.0,
+            },
+            center_layout: false,
+            ..Default::default()
+        };
+
+        let grid = GridLayout {
+            rows: 2,
+            cols: 3,
+            cards_per_page: 6,
+            total_pages: 1,
+        };
+
+        let effective = params.effective_margins(&grid);
+
+        // Should return user-specified margins
+        assert_eq!(effective.top, 5.0);
+        assert_eq!(effective.right, 10.0);
+        assert_eq!(effective.bottom, 15.0);
+        assert_eq!(effective.left, 20.0);
+    }
+
+    #[test]
+    fn test_effective_margins_with_centering() {
+        let params = LayoutParams {
+            page_size: (100.0, 150.0),
+            card_size: (20.0, 30.0),
+            spacing: (2.0, 3.0),
+            margins: Margins::uniform(5.0), // Should be ignored when centering
+            page_orientation: PageOrientation::Portrait,
+            center_layout: true,
+            ..Default::default()
+        };
+
+        // Grid: 2 cols, 2 rows
+        let grid = GridLayout {
+            rows: 2,
+            cols: 2,
+            cards_per_page: 4,
+            total_pages: 1,
+        };
+
+        let effective = params.effective_margins(&grid);
+
+        // Grid dimensions:
+        // Width = 2 * 20 + 1 * 2 = 42mm
+        // Height = 2 * 30 + 1 * 3 = 63mm
+        // Centered margins:
+        // Horizontal = (100 - 42) / 2 = 29mm
+        // Vertical = (150 - 63) / 2 = 43.5mm
+
+        assert_eq!(effective.left, 29.0);
+        assert_eq!(effective.right, 29.0);
+        assert_eq!(effective.top, 43.5);
+        assert_eq!(effective.bottom, 43.5);
+    }
+
+    #[test]
+    fn test_effective_margins_with_centering_landscape() {
+        let params = LayoutParams {
+            page_size: (100.0, 150.0),
+            card_size: (20.0, 30.0),
+            spacing: (2.0, 3.0),
+            margins: Margins::uniform(5.0), // Should be ignored when centering
+            page_orientation: PageOrientation::Landscape, // Page becomes 150x100
+            center_layout: true,
+            ..Default::default()
+        };
+
+        // Grid: 3 cols, 1 row (landscape gives more width)
+        let grid = GridLayout {
+            rows: 1,
+            cols: 3,
+            cards_per_page: 3,
+            total_pages: 1,
+        };
+
+        let effective = params.effective_margins(&grid);
+
+        // Grid dimensions (on landscape page 150x100):
+        // Width = 3 * 20 + 2 * 2 = 64mm
+        // Height = 1 * 30 + 0 * 3 = 30mm
+        // Centered margins:
+        // Horizontal = (150 - 64) / 2 = 43mm
+        // Vertical = (100 - 30) / 2 = 35mm
+
+        assert_eq!(effective.left, 43.0);
+        assert_eq!(effective.right, 43.0);
+        assert_eq!(effective.top, 35.0);
+        assert_eq!(effective.bottom, 35.0);
+    }
+
+    #[test]
+    fn test_effective_margins_single_card_centered() {
+        let params = LayoutParams {
+            page_size: (100.0, 150.0),
+            card_size: (50.0, 70.0),
+            spacing: (0.0, 0.0),
+            margins: Margins::uniform(5.0),
+            page_orientation: PageOrientation::Portrait,
+            center_layout: true,
+            ..Default::default()
+        };
+
+        let grid = GridLayout {
+            rows: 1,
+            cols: 1,
+            cards_per_page: 1,
+            total_pages: 1,
+        };
+
+        let effective = params.effective_margins(&grid);
+
+        // Grid dimensions: 50x70mm (single card, no spacing)
+        // Centered margins:
+        // Horizontal = (100 - 50) / 2 = 25mm
+        // Vertical = (150 - 70) / 2 = 40mm
+
+        assert_eq!(effective.left, 25.0);
+        assert_eq!(effective.right, 25.0);
+        assert_eq!(effective.top, 40.0);
+        assert_eq!(effective.bottom, 40.0);
     }
 }

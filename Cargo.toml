@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-egui = "0.28"
-eframe = { version = "0.28", default-features = false, features = [
+egui = "0.29"
+eframe = { version = "0.29", default-features = false, features = [
     "accesskit",     # Make egui compatible with screen readers
     "default_fonts", # Embed the default egui fonts
     "glow",          # Use glow rendering backend
@@ -25,6 +25,7 @@ serde_json = "1.0"  # JSON support
 keyring = "2.0"  # Secure credential storage
 dirs = "5.0"  # Standard user directories
 log = "0.4"  # Logging
+printpdf = { version = "0.9", default-features = false, features = ["images", "jpeg", "png", "tiff"] }  # PDF generation
 
 [dev-dependencies]
 tempfile = "3.8"  # For creating test files

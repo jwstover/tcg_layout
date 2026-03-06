@@ -1,5 +1,6 @@
 use crate::types::{
-    Card, CardPosition, FillOrder, GridLayout, LayoutParams, PageLayout, PageOrientation,
+    Card, CardPosition, CutMark, CutMarkType, FillOrder, GridLayout, LayoutParams, PageLayout,
+    PageOrientation,
 };
 
 pub fn calculate_grid(params: &LayoutParams) -> GridLayout {
@@ -9,8 +10,20 @@ pub fn calculate_grid(params: &LayoutParams) -> GridLayout {
         PageOrientation::Landscape => (params.page_size.1, params.page_size.0), // Swap width and height
     };
 
-    let available_width = page_width - params.margins.left - params.margins.right;
-    let available_height = page_height - params.margins.top - params.margins.bottom;
+    // When centering, ignore margins for grid calculation to maximize space
+    let (margin_left, margin_right, margin_top, margin_bottom) = if params.center_layout {
+        (0.0, 0.0, 0.0, 0.0)
+    } else {
+        (
+            params.margins.left,
+            params.margins.right,
+            params.margins.top,
+            params.margins.bottom,
+        )
+    };
+
+    let available_width = page_width - margin_left - margin_right;
+    let available_height = page_height - margin_top - margin_bottom;
 
     let card_width_with_spacing = params.card_size.0 + params.spacing.0;
     let card_height_with_spacing = params.card_size.1 + params.spacing.1;
@@ -88,8 +101,10 @@ pub fn calculate_card_position(
         }
     };
 
-    let start_x = params.margins.left;
-    let start_y = params.margins.top;
+    // Use effective margins for positioning
+    let effective_margins = params.effective_margins(grid);
+    let start_x = effective_margins.left;
+    let start_y = effective_margins.top;
 
     CardPosition {
         x: start_x + col as f32 * (params.card_size.0 + params.spacing.0),
@@ -100,8 +115,10 @@ pub fn calculate_card_position(
 pub fn generate_positions(params: &LayoutParams, grid: &GridLayout) -> Vec<CardPosition> {
     let mut positions = Vec::new();
 
-    let start_x = params.margins.left;
-    let start_y = params.margins.top;
+    // Use effective margins for positioning
+    let effective_margins = params.effective_margins(grid);
+    let start_x = effective_margins.left;
+    let start_y = effective_margins.top;
 
     for card_index in 0..grid.cards_per_page {
         let (row, col) = match params.orientation {
@@ -124,6 +141,108 @@ pub fn generate_positions(params: &LayoutParams, grid: &GridLayout) -> Vec<CardP
     }
 
     positions
+}
+
+pub fn calculate_cut_marks(params: &LayoutParams, grid: &GridLayout) -> Vec<CutMark> {
+    let mut cut_marks = Vec::new();
+
+    // Get effective page dimensions based on orientation
+    let (page_width, page_height) = match params.page_orientation {
+        PageOrientation::Portrait => params.page_size,
+        PageOrientation::Landscape => (params.page_size.1, params.page_size.0),
+    };
+
+    // Use effective margins for cut mark positioning
+    let effective_margins = params.effective_margins(grid);
+    let start_x = effective_margins.left;
+    let start_y = effective_margins.top;
+    let card_width_with_spacing = params.card_size.0 + params.spacing.0;
+    let card_height_with_spacing = params.card_size.1 + params.spacing.1;
+
+    // Calculate the bounds of the card grid (using trim positions, not bleed positions)
+    // Note: When bleed is enabled, actual images extend beyond these bounds by bleed_mm
+    let grid_bottom =
+        start_y + (grid.rows as f32 - 1.0) * card_height_with_spacing + params.card_size.1;
+    let grid_right =
+        start_x + (grid.cols as f32 - 1.0) * card_width_with_spacing + params.card_size.0;
+
+    // Vertical cut marks - at the left and right edge of each card
+    for col in 0..grid.cols {
+        let card_left_x = start_x + col as f32 * card_width_with_spacing;
+        let card_right_x = card_left_x + params.card_size.0;
+
+        // Left edge of card - extend from page edge to top margin, and from bottom margin to page edge
+        cut_marks.push(CutMark {
+            x1: card_left_x,
+            y1: 0.0, // Top edge of page
+            x2: card_left_x,
+            y2: start_y, // Top margin edge
+            mark_type: CutMarkType::Vertical,
+        });
+        cut_marks.push(CutMark {
+            x1: card_left_x,
+            y1: grid_bottom, // Bottom of card grid
+            x2: card_left_x,
+            y2: page_height, // Bottom edge of page
+            mark_type: CutMarkType::Vertical,
+        });
+
+        // Right edge of card - extend from page edge to top margin, and from bottom margin to page edge
+        cut_marks.push(CutMark {
+            x1: card_right_x,
+            y1: 0.0, // Top edge of page
+            x2: card_right_x,
+            y2: start_y, // Top margin edge
+            mark_type: CutMarkType::Vertical,
+        });
+        cut_marks.push(CutMark {
+            x1: card_right_x,
+            y1: grid_bottom, // Bottom of card grid
+            x2: card_right_x,
+            y2: page_height, // Bottom edge of page
+            mark_type: CutMarkType::Vertical,
+        });
+    }
+
+    // Horizontal cut marks - at the top and bottom edge of each card
+    for row in 0..grid.rows {
+        let card_top_y = start_y + row as f32 * card_height_with_spacing;
+        let card_bottom_y = card_top_y + params.card_size.1;
+
+        // Top edge of card - extend from page edge to left margin, and from right margin to page edge
+        cut_marks.push(CutMark {
+            x1: 0.0, // Left edge of page
+            y1: card_top_y,
+            x2: start_x, // Left margin edge
+            y2: card_top_y,
+            mark_type: CutMarkType::Horizontal,
+        });
+        cut_marks.push(CutMark {
+            x1: grid_right, // Right of card grid
+            y1: card_top_y,
+            x2: page_width, // Right edge of page
+            y2: card_top_y,
+            mark_type: CutMarkType::Horizontal,
+        });
+
+        // Bottom edge of card - extend from page edge to left margin, and from right margin to page edge
+        cut_marks.push(CutMark {
+            x1: 0.0, // Left edge of page
+            y1: card_bottom_y,
+            x2: start_x, // Left margin edge
+            y2: card_bottom_y,
+            mark_type: CutMarkType::Horizontal,
+        });
+        cut_marks.push(CutMark {
+            x1: grid_right, // Right of card grid
+            y1: card_bottom_y,
+            x2: page_width, // Right edge of page
+            y2: card_bottom_y,
+            mark_type: CutMarkType::Horizontal,
+        });
+    }
+
+    cut_marks
 }
 
 #[cfg(test)]
@@ -156,6 +275,9 @@ mod tests {
             orientation: FillOrder::RowMajor,
             page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
+            bleed_mm: 0.0,
+            enable_bleed: false,
+            center_layout: false,
         };
 
         let grid = calculate_grid(&params);
@@ -179,6 +301,9 @@ mod tests {
             orientation: FillOrder::RowMajor,
             page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
+            bleed_mm: 0.0,
+            enable_bleed: false,
+            center_layout: false,
         };
 
         let grid = calculate_grid(&params);
@@ -252,6 +377,9 @@ mod tests {
             orientation: FillOrder::RowMajor,
             page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
+            bleed_mm: 0.0,
+            enable_bleed: false,
+            center_layout: false,
         };
 
         let grid = GridLayout {
@@ -289,6 +417,9 @@ mod tests {
             orientation: FillOrder::ColumnMajor,
             page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
+            bleed_mm: 0.0,
+            enable_bleed: false,
+            center_layout: false,
         };
 
         let grid = GridLayout {
@@ -340,6 +471,9 @@ mod tests {
             orientation: FillOrder::RowMajor,
             page_orientation: PageOrientation::Landscape, // Landscape mode
             target_dpi: 300,
+            bleed_mm: 0.0,
+            enable_bleed: false,
+            center_layout: false,
         };
 
         let grid = calculate_grid(&params);
@@ -388,5 +522,103 @@ mod tests {
 
         // Second page should have remaining copy of card2
         assert_eq!(pages[1].cards[0].0.path, PathBuf::from("card2.jpg"));
+    }
+
+    #[test]
+    fn test_calculate_grid_with_centering() {
+        let params = LayoutParams {
+            page_size: (210.0, 297.0),
+            card_size: (63.0, 88.0),
+            margins: Margins::uniform(10.0), // Should be ignored
+            spacing: (2.0, 2.0),
+            orientation: FillOrder::RowMajor,
+            page_orientation: PageOrientation::Portrait,
+            target_dpi: 300,
+            bleed_mm: 0.0,
+            enable_bleed: false,
+            center_layout: true, // Centering enabled
+        };
+
+        let grid = calculate_grid(&params);
+
+        // With centering, margins are ignored for grid calculation
+        // Available: 210x297mm (full page)
+        // Cols: (210 + 2) / (63 + 2) = 212 / 65 = 3.26 -> 3
+        // Rows: (297 + 2) / (88 + 2) = 299 / 90 = 3.32 -> 3
+        assert_eq!(grid.cols, 3);
+        assert_eq!(grid.rows, 3);
+        assert_eq!(grid.cards_per_page, 9);
+    }
+
+    #[test]
+    fn test_card_positioning_with_centering() {
+        let params = LayoutParams {
+            page_size: (100.0, 150.0),
+            card_size: (20.0, 30.0),
+            spacing: (2.0, 3.0),
+            margins: Margins::uniform(5.0), // Should be ignored
+            page_orientation: PageOrientation::Portrait,
+            center_layout: true,
+            ..Default::default()
+        };
+
+        // Create a 2x2 grid
+        let grid = GridLayout {
+            rows: 2,
+            cols: 2,
+            cards_per_page: 4,
+            total_pages: 1,
+        };
+
+        let positions = generate_positions(&params, &grid);
+
+        // Grid dimensions: 2*20 + 1*2 = 42mm wide, 2*30 + 1*3 = 63mm tall
+        // Centered margins: H=(100-42)/2=29mm, V=(150-63)/2=43.5mm
+
+        // First card (row 0, col 0) should be at (29, 43.5)
+        assert_eq!(positions[0].x, 29.0);
+        assert_eq!(positions[0].y, 43.5);
+
+        // Second card (row 0, col 1) should be at (29 + 20 + 2, 43.5) = (51, 43.5)
+        assert_eq!(positions[1].x, 51.0);
+        assert_eq!(positions[1].y, 43.5);
+
+        // Third card (row 1, col 0) should be at (29, 43.5 + 30 + 3) = (29, 76.5)
+        assert_eq!(positions[2].x, 29.0);
+        assert_eq!(positions[2].y, 76.5);
+
+        // Fourth card (row 1, col 1) should be at (51, 76.5)
+        assert_eq!(positions[3].x, 51.0);
+        assert_eq!(positions[3].y, 76.5);
+    }
+
+    #[test]
+    fn test_centering_symmetry() {
+        let params = LayoutParams {
+            page_size: (200.0, 300.0),
+            card_size: (40.0, 60.0),
+            spacing: (5.0, 8.0),
+            margins: Margins::uniform(10.0),
+            page_orientation: PageOrientation::Portrait,
+            center_layout: true,
+            ..Default::default()
+        };
+
+        let grid = GridLayout {
+            rows: 3,
+            cols: 2,
+            cards_per_page: 6,
+            total_pages: 1,
+        };
+
+        let effective_margins = params.effective_margins(&grid);
+
+        // Verify symmetry: left should equal right, top should equal bottom
+        assert_eq!(effective_margins.left, effective_margins.right);
+        assert_eq!(effective_margins.top, effective_margins.bottom);
+
+        // Verify non-negative margins
+        assert!(effective_margins.left >= 0.0);
+        assert!(effective_margins.top >= 0.0);
     }
 }

@@ -1,20 +1,49 @@
+use crate::layout::calculate_cut_marks;
 use crate::types::{LayoutParams, PageLayout, PageOrientation};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use svg::node::element::{Definitions, Group, Image, Rectangle};
-use svg::Document;
+use svg::node::element::{Definitions, Element, Group, Image, Line, Rectangle};
+use svg::{Document, Node};
+use tcg_layout::bleed;
 
 pub struct SvgExporter {
     params: LayoutParams,
+    bleed_dir: Option<PathBuf>,
 }
 
 impl SvgExporter {
     pub fn new(params: LayoutParams) -> Self {
-        Self { params }
+        Self {
+            params,
+            bleed_dir: None,
+        }
+    }
+
+    fn setup_bleed_directory(&mut self, svg_path: &Path) -> Result<PathBuf> {
+        let svg_stem = svg_path
+            .file_stem()
+            .context("Invalid SVG path")?
+            .to_string_lossy();
+
+        let bleed_dir = svg_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{svg_stem}_bleed"));
+
+        std::fs::create_dir_all(&bleed_dir).with_context(|| {
+            format!("Failed to create bleed directory: {}", bleed_dir.display())
+        })?;
+
+        self.bleed_dir = Some(bleed_dir.clone());
+        Ok(bleed_dir)
     }
 
     /// Export a single page to SVG format
-    pub fn export_page(&self, page: &PageLayout, output_path: &Path) -> Result<()> {
+    pub fn export_page(&mut self, page: &PageLayout, output_path: &Path) -> Result<()> {
+        if self.params.enable_bleed && self.params.bleed_mm > 0.0 {
+            self.setup_bleed_directory(output_path)?;
+        }
+
         let document = self.create_svg_document(page)?;
         svg::save(output_path, &document)
             .with_context(|| format!("Failed to save SVG to {}", output_path.display()))?;
@@ -22,7 +51,11 @@ impl SvgExporter {
     }
 
     /// Export all pages to separate SVG files
-    pub fn export_pages(&self, pages: &[PageLayout], output_dir: &Path) -> Result<Vec<PathBuf>> {
+    pub fn export_pages(
+        &mut self,
+        pages: &[PageLayout],
+        output_dir: &Path,
+    ) -> Result<Vec<PathBuf>> {
         let mut output_paths = Vec::new();
 
         for page in pages {
@@ -37,14 +70,22 @@ impl SvgExporter {
     }
 
     /// Export all pages to a single SVG file with multiple pages
-    pub fn export_pages_single_file(&self, pages: &[PageLayout], output_path: &Path) -> Result<()> {
+    pub fn export_pages_single_file(
+        &mut self,
+        pages: &[PageLayout],
+        output_path: &Path,
+    ) -> Result<()> {
+        if self.params.enable_bleed && self.params.bleed_mm > 0.0 {
+            self.setup_bleed_directory(output_path)?;
+        }
+
         let document = self.create_multi_page_svg_document(pages)?;
         svg::save(output_path, &document)
             .with_context(|| format!("Failed to save SVG to {}", output_path.display()))?;
         Ok(())
     }
 
-    fn create_svg_document(&self, page: &PageLayout) -> Result<Document> {
+    fn create_svg_document(&mut self, page: &PageLayout) -> Result<Document> {
         let (page_width, page_height) = self.get_page_dimensions();
 
         // Create SVG document with proper dimensions in mm
@@ -73,7 +114,23 @@ impl SvgExporter {
 
         main_group = main_group.add(background);
 
-        // Add each card as an image reference
+        // Add cut marks (render first so they appear in background)
+        let cut_marks =
+            calculate_cut_marks(&self.params, &crate::layout::calculate_grid(&self.params));
+        for cut_mark in &cut_marks {
+            let cut_line = Line::new()
+                .set("x1", cut_mark.x1)
+                .set("y1", cut_mark.y1)
+                .set("x2", cut_mark.x2)
+                .set("y2", cut_mark.y2)
+                .set("stroke", "#808080") // Gray color
+                .set("stroke-width", "0.5") // Thin line
+                .set("stroke-linecap", "round");
+
+            main_group = main_group.add(cut_line);
+        }
+
+        // Add each card as an image reference (render second so they appear on top)
         for (card, position) in &page.cards {
             let card_element = self.create_card_element(card, position)?;
             main_group = main_group.add(card_element);
@@ -83,47 +140,100 @@ impl SvgExporter {
         Ok(document)
     }
 
-    fn create_multi_page_svg_document(&self, pages: &[PageLayout]) -> Result<Document> {
+    fn create_multi_page_svg_document(&mut self, pages: &[PageLayout]) -> Result<Document> {
         if pages.is_empty() {
             return Ok(Document::new());
         }
 
         let (page_width, page_height) = self.get_page_dimensions();
-        let total_height = page_height * pages.len() as f32;
 
-        // Create SVG document with height for all pages
+        // Create SVG document with first page dimensions
         let mut document = Document::new()
             .set("width", format!("{page_width}mm"))
-            .set("height", format!("{total_height}mm"))
-            .set("viewBox", format!("0 0 {page_width} {total_height}"))
+            .set("height", format!("{page_height}mm"))
+            .set("viewBox", format!("0 0 {page_width} {page_height}"))
             .set("xmlns", "http://www.w3.org/2000/svg")
-            .set("xmlns:xlink", "http://www.w3.org/1999/xlink");
+            .set("xmlns:xlink", "http://www.w3.org/1999/xlink")
+            .set(
+                "xmlns:sodipodi",
+                "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd",
+            )
+            .set(
+                "xmlns:inkscape",
+                "http://www.inkscape.org/namespaces/inkscape",
+            );
 
         // Add definitions section for reusable elements
         let defs = Definitions::new();
         document = document.add(defs);
 
-        // Create a group for each page
-        for (page_index, page) in pages.iter().enumerate() {
-            let page_y_offset = page_index as f32 * page_height;
+        // Create Inkscape namedview element containing page definitions
+        let mut namedview = Element::new("sodipodi:namedview");
+        namedview.assign("id", "base");
+        namedview.assign("pagecolor", "#ffffff");
+        namedview.assign("bordercolor", "#666666");
+        namedview.assign("borderopacity", "1.0");
+        namedview.assign("inkscape:pageopacity", "0.0");
+        namedview.assign("inkscape:pageshadow", "2");
+        namedview.assign("inkscape:document-units", "mm");
 
+        // Create individual page elements within namedview
+        for (page_index, _page) in pages.iter().enumerate() {
+            let page_x = page_index as f32 * page_width; // Position pages without extra spacing
+            let mut page_element = Element::new("inkscape:page");
+            page_element.assign("x", format!("{page_x}"));
+            page_element.assign("y", "0");
+            page_element.assign("width", format!("{page_width}"));
+            page_element.assign("height", format!("{page_height}"));
+            page_element.assign("id", format!("page{}", page_index + 1));
+
+            namedview.append(page_element);
+        }
+
+        document = document.add(namedview);
+
+        // Create content groups for each page
+        for (page_index, page) in pages.iter().enumerate() {
+            let page_x = page_index as f32 * page_width; // Match page positioning
+
+            // Create content group for this page
             let mut page_group = Group::new()
-                .set("id", format!("page-{}", page.page_number))
-                .set("transform", format!("translate(0, {page_y_offset})"));
+                .set("id", format!("page-{}-content", page.page_number))
+                .set("inkscape:groupmode", "layer")
+                .set(
+                    "inkscape:label",
+                    format!("Page {} Content", page.page_number),
+                )
+                .set("transform", format!("translate({page_x},0)"));
 
             // Add background rectangle for this page
             let background = Rectangle::new()
                 .set("x", 0)
-                .set("y", 0)
+                .set("y", 1)
                 .set("width", page_width)
                 .set("height", page_height)
                 .set("fill", "white")
-                .set("stroke", "#cccccc")
-                .set("stroke-width", "0.5");
+                .set("stroke", "none");
 
             page_group = page_group.add(background);
 
-            // Add each card as an image reference
+            // Add cut marks for this page (render first so they appear in background)
+            let cut_marks =
+                calculate_cut_marks(&self.params, &crate::layout::calculate_grid(&self.params));
+            for cut_mark in &cut_marks {
+                let cut_line = Line::new()
+                    .set("x1", cut_mark.x1)
+                    .set("y1", cut_mark.y1)
+                    .set("x2", cut_mark.x2)
+                    .set("y2", cut_mark.y2)
+                    .set("stroke", "#808080") // Gray color
+                    .set("stroke-width", "0.5") // Thin line
+                    .set("stroke-linecap", "round");
+
+                page_group = page_group.add(cut_line);
+            }
+
+            // Add each card as an image reference (render second so they appear on top)
             for (card, position) in &page.cards {
                 let card_element = self.create_card_element(card, position)?;
                 page_group = page_group.add(card_element);
@@ -136,20 +246,88 @@ impl SvgExporter {
     }
 
     fn create_card_element(
-        &self,
+        &mut self,
         card: &crate::types::Card,
         position: &crate::types::CardPosition,
     ) -> Result<Image> {
-        // Convert the absolute path to a relative path or file URI
-        let image_path = self.get_image_reference(&card.path)?;
+        let (image_href, card_width, card_height, img_x, img_y) = if self.params.enable_bleed
+            && self.params.bleed_mm > 0.0
+        {
+            // Apply bleed processing
+            let bleed_dir = self
+                .bleed_dir
+                .as_ref()
+                .context("Bleed directory not set up")?;
+
+            // Load image metadata to get actual dimensions
+            let metadata = tcg_layout::image::load_image_metadata(&card.path)?;
+
+            // Calculate bleed based on actual image dimensions
+            let (bleed_pixels_x, bleed_pixels_y) = bleed::calculate_bleed_pixels_from_dimensions(
+                self.params.bleed_mm,
+                self.params.card_size,
+                metadata.dimensions,
+            );
+
+            // Use average for symmetric bleed application
+            let bleed_pixels = ((bleed_pixels_x + bleed_pixels_y) / 2).max(1);
+
+            let bleed_img = bleed::apply_bleed(&card.path, bleed_pixels)?;
+
+            // Save to bleed directory
+            let filename = card
+                .path
+                .file_name()
+                .context("Invalid card path")?
+                .to_string_lossy()
+                .replace(".jpg", "_bleed.png")
+                .replace(".jpeg", "_bleed.png")
+                .replace(".tiff", "_bleed.png")
+                .replace(".tif", "_bleed.png");
+
+            let bleed_path = bleed_dir.join(&filename);
+            bleed_img
+                .save(&bleed_path)
+                .with_context(|| format!("Failed to save bleed image: {}", bleed_path.display()))?;
+
+            // Create relative reference
+            let relative_path = format!(
+                "{}/{}",
+                self.bleed_dir
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy(),
+                filename
+            );
+
+            // Calculate dimensions and position with bleed
+            let bleed_width = self.params.card_size.0 + 2.0 * self.params.bleed_mm;
+            let bleed_height = self.params.card_size.1 + 2.0 * self.params.bleed_mm;
+            let offset_x = position.x - self.params.bleed_mm;
+            let offset_y = position.y - self.params.bleed_mm;
+
+            (relative_path, bleed_width, bleed_height, offset_x, offset_y)
+        } else {
+            // No bleed - use original image
+            let image_ref = self.get_image_reference(&card.path)?;
+            (
+                image_ref,
+                self.params.card_size.0,
+                self.params.card_size.1,
+                position.x,
+                position.y,
+            )
+        };
 
         let image = Image::new()
-            .set("x", position.x)
-            .set("y", position.y)
-            .set("width", self.params.card_size.0)
-            .set("height", self.params.card_size.1)
-            .set("href", image_path)
-            .set("preserveAspectRatio", "xMidYMid meet");
+            .set("x", img_x)
+            .set("y", img_y)
+            .set("width", card_width)
+            .set("height", card_height)
+            .set("href", image_href)
+            .set("preserveAspectRatio", "none"); // Changed to ensure bleed fills exactly
 
         Ok(image)
     }
@@ -182,7 +360,7 @@ pub fn export_page_to_svg(
     params: &LayoutParams,
     output_path: &Path,
 ) -> Result<()> {
-    let exporter = SvgExporter::new(params.clone());
+    let mut exporter = SvgExporter::new(params.clone());
     exporter.export_page(page_layout, output_path)
 }
 
@@ -192,7 +370,7 @@ pub fn export_pages_to_svg(
     params: &LayoutParams,
     output_dir: &Path,
 ) -> Result<Vec<PathBuf>> {
-    let exporter = SvgExporter::new(params.clone());
+    let mut exporter = SvgExporter::new(params.clone());
     exporter.export_pages(pages, output_dir)
 }
 
@@ -202,7 +380,7 @@ pub fn export_pages_to_single_svg(
     params: &LayoutParams,
     output_path: &Path,
 ) -> Result<()> {
-    let exporter = SvgExporter::new(params.clone());
+    let mut exporter = SvgExporter::new(params.clone());
     exporter.export_pages_single_file(pages, output_path)
 }
 
@@ -224,6 +402,9 @@ mod tests {
             orientation: FillOrder::RowMajor,
             page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
+            bleed_mm: 0.0,
+            enable_bleed: false,
+            center_layout: false,
         }
     }
 
@@ -352,7 +533,7 @@ mod tests {
     #[test]
     fn test_create_svg_document() {
         let params = create_test_params();
-        let exporter = SvgExporter::new(params);
+        let mut exporter = SvgExporter::new(params);
         let page = create_test_page();
 
         let result = exporter.create_svg_document(&page);
@@ -382,19 +563,21 @@ mod tests {
         // Check that the file contains expected SVG content for multiple pages
         let content = std::fs::read_to_string(&output_path).unwrap();
         assert!(content.contains("<svg"));
-        assert!(content.contains("width=\"100mm\""));
-        assert!(content.contains("height=\"300mm\"")); // 2 pages * 150mm each
-        assert!(content.contains("page-1"));
-        assert!(content.contains("page-2"));
+        assert!(content.contains("sodipodi:namedview"));
+        assert!(content.contains("inkscape:page"));
+        assert!(content.contains("page1"));
+        assert!(content.contains("page2"));
         assert!(content.contains("card1.jpg"));
         assert!(content.contains("card4.jpg"));
-        assert!(content.contains("translate(0, 150)")); // Second page offset
+        assert!(content.contains("inkscape:groupmode=\"layer\""));
+        assert!(content.contains("Page 1 Content"));
+        assert!(content.contains("Page 2 Content"));
     }
 
     #[test]
     fn test_create_multi_page_svg_document() {
         let params = create_test_params();
-        let exporter = SvgExporter::new(params);
+        let mut exporter = SvgExporter::new(params);
         let pages = vec![
             create_test_page(),
             PageLayout {
@@ -413,7 +596,7 @@ mod tests {
     #[test]
     fn test_create_multi_page_svg_document_empty() {
         let params = create_test_params();
-        let exporter = SvgExporter::new(params);
+        let mut exporter = SvgExporter::new(params);
         let pages = vec![];
 
         let result = exporter.create_multi_page_svg_document(&pages);

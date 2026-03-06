@@ -1,4 +1,2 @@
 [target.aarch64-apple-darwin]
-rustflags = [
-  "-L", "/opt/homebrew/opt/libiconv/lib",
-]
+rustflags = ["-L/opt/homebrew/Cellar/libiconv/1.18/lib"]

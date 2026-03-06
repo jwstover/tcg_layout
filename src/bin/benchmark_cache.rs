@@ -36,7 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cache_misses = 0;
 
     for path in &image_paths {
-        if let Some(_thumbnail) = manager.request_thumbnail(path.clone()) {
+        if let Some(_thumbnail) = manager.request_thumbnail(path.clone(), 0.0, false, (63.0, 88.0))
+        {
             cache_hits += 1;
         } else {
             cache_misses += 1;
@@ -63,9 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
-    println!(
-        "Processed {processed_count} thumbnails in {attempts} attempts"
-    );
+    println!("Processed {processed_count} thumbnails in {attempts} attempts");
 
     // Second pass - should be mostly cache hits
     let start = Instant::now();
@@ -73,7 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cache_misses = 0;
 
     for path in &image_paths {
-        if let Some(_thumbnail) = manager.request_thumbnail(path.clone()) {
+        if let Some(_thumbnail) = manager.request_thumbnail(path.clone(), 0.0, false, (63.0, 88.0))
+        {
             cache_hits += 1;
         } else {
             cache_misses += 1;

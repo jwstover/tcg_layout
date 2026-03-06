@@ -2,18 +2,38 @@ use anyhow::Result;
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageBuffer, Rgba};
 use std::path::Path;
 
+use tcg_layout::bleed;
+
 const THUMBNAIL_WIDTH: u32 = 150;
 const THUMBNAIL_HEIGHT: u32 = 200;
 
-pub fn generate_thumbnail(image_path: &Path) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+pub fn generate_thumbnail(
+    image_path: &Path,
+    bleed_mm: f32,
+    enable_bleed: bool,
+    card_size_mm: (f32, f32),
+) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
     // Load the image
     let img = image::open(image_path)?;
 
     // Create thumbnail with aspect ratio preservation
-    let thumbnail = resize_with_aspect_ratio(img, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
+    let thumbnail = resize_with_aspect_ratio(img.clone(), THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
 
     // Convert to RGBA for consistent handling
-    Ok(thumbnail.to_rgba8())
+    let mut thumbnail_rgba = thumbnail.to_rgba8();
+
+    // Apply bleed if enabled
+    if enable_bleed && bleed_mm > 0.0 {
+        let (thumb_width, _) = thumbnail_rgba.dimensions();
+
+        // Calculate bleed as proportion of card size
+        let bleed_fraction = bleed_mm / card_size_mm.0;
+        let thumbnail_bleed_px = (bleed_fraction * thumb_width as f32).round() as u32;
+
+        thumbnail_rgba = bleed::apply_bleed_to_thumbnail(&thumbnail_rgba, thumbnail_bleed_px);
+    }
+
+    Ok(thumbnail_rgba)
 }
 
 fn resize_with_aspect_ratio(
@@ -87,7 +107,7 @@ mod tests {
     fn test_generate_thumbnail_preserves_aspect_ratio() {
         let temp_file = create_test_image(300, 600); // 1:2 aspect ratio
 
-        let thumbnail = generate_thumbnail(temp_file.path()).unwrap();
+        let thumbnail = generate_thumbnail(temp_file.path(), 0.0, false, (63.0, 88.0)).unwrap();
         let (thumb_width, thumb_height) = thumbnail.dimensions();
 
         // Should fit within 150x200 bounds
@@ -104,7 +124,7 @@ mod tests {
     fn test_generate_thumbnail_wide_image() {
         let temp_file = create_test_image(600, 300); // 2:1 aspect ratio
 
-        let thumbnail = generate_thumbnail(temp_file.path()).unwrap();
+        let thumbnail = generate_thumbnail(temp_file.path(), 0.0, false, (63.0, 88.0)).unwrap();
         let (thumb_width, thumb_height) = thumbnail.dimensions();
 
         // Should fit within 150x200 bounds
@@ -121,7 +141,7 @@ mod tests {
     fn test_generate_thumbnail_square_image() {
         let temp_file = create_test_image(400, 400); // 1:1 aspect ratio
 
-        let thumbnail = generate_thumbnail(temp_file.path()).unwrap();
+        let thumbnail = generate_thumbnail(temp_file.path(), 0.0, false, (63.0, 88.0)).unwrap();
         let (thumb_width, thumb_height) = thumbnail.dimensions();
 
         // Should fit within 150x200 bounds

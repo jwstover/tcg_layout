@@ -11,15 +11,19 @@ use tokio::sync::{mpsc, oneshot};
 pub struct CacheKey {
     path: PathBuf,
     modified_time: SystemTime,
+    bleed_enabled: bool,
+    bleed_mm_rounded: u32, // Rounded to avoid float comparison issues
 }
 
 impl CacheKey {
-    pub fn new(path: PathBuf) -> Option<Self> {
+    pub fn new(path: PathBuf, bleed_mm: f32, enable_bleed: bool) -> Option<Self> {
         let metadata = std::fs::metadata(&path).ok()?;
         let modified_time = metadata.modified().ok()?;
         Some(Self {
             path,
             modified_time,
+            bleed_enabled: enable_bleed,
+            bleed_mm_rounded: (bleed_mm * 10.0).round() as u32, // Store as tenths of mm
         })
     }
 
@@ -32,6 +36,9 @@ impl CacheKey {
 pub enum ThumbnailRequest {
     Load {
         path: PathBuf,
+        bleed_mm: f32,
+        enable_bleed: bool,
+        card_size_mm: (f32, f32),
         response_tx: oneshot::Sender<ThumbnailResult>,
     },
 }
@@ -46,6 +53,8 @@ pub enum ThumbnailResult {
 pub enum ThumbnailMessage {
     ThumbnailLoaded {
         path: PathBuf,
+        bleed_mm: f32,
+        enable_bleed: bool,
         result: ThumbnailResult,
     },
 }
@@ -68,13 +77,24 @@ impl ThumbnailManager {
         tokio::spawn(async move {
             while let Some(request) = request_rx.recv().await {
                 match request {
-                    ThumbnailRequest::Load { path, response_tx } => {
+                    ThumbnailRequest::Load {
+                        path,
+                        bleed_mm,
+                        enable_bleed,
+                        card_size_mm,
+                        response_tx,
+                    } => {
                         let path_clone = path.clone();
                         let message_tx_clone = message_tx.clone();
 
                         // Spawn blocking task for CPU-intensive image processing
                         tokio::task::spawn_blocking(move || {
-                            let result = match generate_thumbnail(&path_clone) {
+                            let result = match generate_thumbnail(
+                                &path_clone,
+                                bleed_mm,
+                                enable_bleed,
+                                card_size_mm,
+                            ) {
                                 Ok(thumbnail) => ThumbnailResult::Success(thumbnail),
                                 Err(e) => ThumbnailResult::Error(e.to_string()),
                             };
@@ -85,6 +105,8 @@ impl ThumbnailManager {
                             // Also send to the message channel for UI updates
                             let _ = message_tx_clone.send(ThumbnailMessage::ThumbnailLoaded {
                                 path: path_clone,
+                                bleed_mm,
+                                enable_bleed,
                                 result,
                             });
                         });
@@ -111,13 +133,24 @@ impl ThumbnailManager {
         tokio::spawn(async move {
             while let Some(request) = request_rx.recv().await {
                 match request {
-                    ThumbnailRequest::Load { path, response_tx } => {
+                    ThumbnailRequest::Load {
+                        path,
+                        bleed_mm,
+                        enable_bleed,
+                        card_size_mm,
+                        response_tx,
+                    } => {
                         let path_clone = path.clone();
                         let message_tx_clone = message_tx.clone();
 
                         // Spawn blocking task for CPU-intensive image processing
                         tokio::task::spawn_blocking(move || {
-                            let result = match generate_thumbnail(&path_clone) {
+                            let result = match generate_thumbnail(
+                                &path_clone,
+                                bleed_mm,
+                                enable_bleed,
+                                card_size_mm,
+                            ) {
                                 Ok(thumbnail) => ThumbnailResult::Success(thumbnail),
                                 Err(e) => ThumbnailResult::Error(e.to_string()),
                             };
@@ -128,6 +161,8 @@ impl ThumbnailManager {
                             // Also send to the message channel for UI updates
                             let _ = message_tx_clone.send(ThumbnailMessage::ThumbnailLoaded {
                                 path: path_clone,
+                                bleed_mm,
+                                enable_bleed,
                                 result,
                             });
                         });
@@ -149,9 +184,12 @@ impl ThumbnailManager {
     pub fn request_thumbnail(
         &mut self,
         path: PathBuf,
+        bleed_mm: f32,
+        enable_bleed: bool,
+        card_size_mm: (f32, f32),
     ) -> Option<ImageBuffer<image::Rgba<u8>, Vec<u8>>> {
-        // Check cache first with file modification time
-        if let Some(cache_key) = CacheKey::new(path.clone()) {
+        // Check cache first with file modification time and bleed settings
+        if let Some(cache_key) = CacheKey::new(path.clone(), bleed_mm, enable_bleed) {
             if let Some(thumbnail) = self.cache.get(&cache_key) {
                 self.cache_hits += 1;
                 return Some(thumbnail.clone());
@@ -169,6 +207,9 @@ impl ThumbnailManager {
 
         let request = ThumbnailRequest::Load {
             path: path.clone(),
+            bleed_mm,
+            enable_bleed,
+            card_size_mm,
             response_tx,
         };
 
@@ -185,13 +226,15 @@ impl ThumbnailManager {
                 // Clean up pending request and cache successful results
                 let ThumbnailMessage::ThumbnailLoaded {
                     ref path,
+                    bleed_mm,
+                    enable_bleed,
                     ref result,
                 } = message;
                 self.pending_requests.remove(path);
 
                 // Cache successful thumbnails
                 if let ThumbnailResult::Success(ref thumbnail) = result {
-                    if let Some(cache_key) = CacheKey::new(path.clone()) {
+                    if let Some(cache_key) = CacheKey::new(path.clone(), bleed_mm, enable_bleed) {
                         self.cache.put(cache_key, thumbnail.clone());
                     }
                 }
@@ -266,7 +309,7 @@ mod tests {
         let path = temp_file.path().to_path_buf();
 
         // Request thumbnail
-        manager.request_thumbnail(path.clone());
+        manager.request_thumbnail(path.clone(), 0.0, false, (63.0, 88.0));
         assert!(manager.has_pending_requests());
         assert_eq!(manager.pending_count(), 1);
 
@@ -281,6 +324,7 @@ mod tests {
                     ThumbnailMessage::ThumbnailLoaded {
                         path: msg_path,
                         result,
+                        ..
                     } => {
                         assert_eq!(msg_path, path);
                         assert!(matches!(result, ThumbnailResult::Success(_)));
@@ -304,7 +348,7 @@ mod tests {
         let nonexistent_path = PathBuf::from("/nonexistent/file.jpg");
 
         // Request thumbnail for nonexistent file
-        manager.request_thumbnail(nonexistent_path.clone());
+        manager.request_thumbnail(nonexistent_path.clone(), 0.0, false, (63.0, 88.0));
         assert!(manager.has_pending_requests());
 
         // Wait a bit for processing
@@ -318,6 +362,7 @@ mod tests {
                     ThumbnailMessage::ThumbnailLoaded {
                         path: msg_path,
                         result,
+                        ..
                     } => {
                         assert_eq!(msg_path, nonexistent_path);
                         assert!(matches!(result, ThumbnailResult::Error(_)));
@@ -338,11 +383,11 @@ mod tests {
         let path = PathBuf::from("/test/path.jpg");
 
         // Request same thumbnail twice
-        let result1 = manager.request_thumbnail(path.clone());
+        let result1 = manager.request_thumbnail(path.clone(), 0.0, false, (63.0, 88.0));
         assert!(result1.is_none()); // Not in cache yet
         assert_eq!(manager.pending_count(), 1);
 
-        let result2 = manager.request_thumbnail(path.clone());
+        let result2 = manager.request_thumbnail(path.clone(), 0.0, false, (63.0, 88.0));
         assert!(result2.is_none()); // Still not in cache, but no duplicate request
         assert_eq!(manager.pending_count(), 1); // Should still be 1
     }
@@ -352,19 +397,24 @@ mod tests {
         let temp_file = create_test_image();
         let path = temp_file.path().to_path_buf();
 
-        let key1 = CacheKey::new(path.clone());
+        let key1 = CacheKey::new(path.clone(), 3.0, true);
         assert!(key1.is_some());
 
-        let key2 = CacheKey::new(path.clone());
+        let key2 = CacheKey::new(path.clone(), 3.0, true);
         assert!(key2.is_some());
 
-        // Keys should be equal for same file
+        // Keys should be equal for same file with same bleed settings
         assert_eq!(key1, key2);
+
+        // Different bleed settings should create different keys
+        let key3 = CacheKey::new(path.clone(), 0.0, false);
+        assert!(key3.is_some());
+        assert_ne!(key1, key3);
 
         // Test nonexistent file
         let nonexistent = PathBuf::from("/nonexistent/file.jpg");
-        let key3 = CacheKey::new(nonexistent);
-        assert!(key3.is_none());
+        let key4 = CacheKey::new(nonexistent, 0.0, false);
+        assert!(key4.is_none());
     }
 
     #[tokio::test]
@@ -374,7 +424,7 @@ mod tests {
         let path = temp_file.path().to_path_buf();
 
         // First request should be a cache miss
-        let result1 = manager.request_thumbnail(path.clone());
+        let result1 = manager.request_thumbnail(path.clone(), 0.0, false, (63.0, 88.0));
         assert!(result1.is_none());
         let (hits, misses, _) = manager.cache_stats();
         assert_eq!(hits, 0);
@@ -399,7 +449,7 @@ mod tests {
         assert!(received_result);
 
         // Second request should be a cache hit
-        let result2 = manager.request_thumbnail(path.clone());
+        let result2 = manager.request_thumbnail(path.clone(), 0.0, false, (63.0, 88.0));
         assert!(result2.is_some());
         let (hits, misses, _) = manager.cache_stats();
         assert_eq!(hits, 1);
