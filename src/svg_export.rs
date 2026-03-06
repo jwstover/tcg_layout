@@ -75,11 +75,21 @@ impl SvgExporter {
         pages: &[PageLayout],
         output_path: &Path,
     ) -> Result<()> {
+        self.export_pages_single_file_with_progress(pages, output_path, |_, _| {})
+    }
+
+    /// Export all pages to a single SVG file with progress callback
+    pub fn export_pages_single_file_with_progress<F: Fn(usize, usize)>(
+        &mut self,
+        pages: &[PageLayout],
+        output_path: &Path,
+        progress: F,
+    ) -> Result<()> {
         if self.params.enable_bleed && self.params.bleed_mm > 0.0 {
             self.setup_bleed_directory(output_path)?;
         }
 
-        let document = self.create_multi_page_svg_document(pages)?;
+        let document = self.create_multi_page_svg_document(pages, &progress)?;
         svg::save(output_path, &document)
             .with_context(|| format!("Failed to save SVG to {}", output_path.display()))?;
         Ok(())
@@ -140,7 +150,11 @@ impl SvgExporter {
         Ok(document)
     }
 
-    fn create_multi_page_svg_document(&mut self, pages: &[PageLayout]) -> Result<Document> {
+    fn create_multi_page_svg_document<F: Fn(usize, usize)>(
+        &mut self,
+        pages: &[PageLayout],
+        progress: &F,
+    ) -> Result<Document> {
         if pages.is_empty() {
             return Ok(Document::new());
         }
@@ -240,6 +254,7 @@ impl SvgExporter {
             }
 
             document = document.add(page_group);
+            progress(page_index + 1, pages.len());
         }
 
         Ok(document)
@@ -380,8 +395,18 @@ pub fn export_pages_to_single_svg(
     params: &LayoutParams,
     output_path: &Path,
 ) -> Result<()> {
+    export_pages_to_single_svg_with_progress(pages, params, output_path, |_, _| {})
+}
+
+/// Utility function to export multiple pages to a single SVG file with progress callback
+pub fn export_pages_to_single_svg_with_progress<F: Fn(usize, usize)>(
+    pages: &[PageLayout],
+    params: &LayoutParams,
+    output_path: &Path,
+    progress: F,
+) -> Result<()> {
     let mut exporter = SvgExporter::new(params.clone());
-    exporter.export_pages_single_file(pages, output_path)
+    exporter.export_pages_single_file_with_progress(pages, output_path, progress)
 }
 
 #[cfg(test)]
@@ -589,7 +614,7 @@ mod tests {
             },
         ];
 
-        let result = exporter.create_multi_page_svg_document(&pages);
+        let result = exporter.create_multi_page_svg_document(&pages, &|_, _| {});
         assert!(result.is_ok());
     }
 
@@ -599,7 +624,44 @@ mod tests {
         let mut exporter = SvgExporter::new(params);
         let pages = vec![];
 
-        let result = exporter.create_multi_page_svg_document(&pages);
+        let result = exporter.create_multi_page_svg_document(&pages, &|_, _| {});
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_export_with_progress_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("progress_test.svg");
+        let params = create_test_params();
+        let pages = vec![
+            create_test_page(),
+            PageLayout {
+                page_number: 2,
+                cards: vec![(
+                    Card::new(PathBuf::from("card4.jpg")),
+                    CardPosition { x: 5.0, y: 5.0 },
+                )],
+            },
+        ];
+
+        let progress_count = Arc::new(AtomicUsize::new(0));
+        let progress_count_clone = progress_count.clone();
+
+        let result = export_pages_to_single_svg_with_progress(
+            &pages,
+            &params,
+            &output_path,
+            move |completed, total| {
+                assert_eq!(total, 2);
+                progress_count_clone.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(progress_count_clone.load(Ordering::SeqCst), completed);
+            },
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(progress_count.load(Ordering::SeqCst), 2);
     }
 }

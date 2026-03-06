@@ -17,6 +17,15 @@ impl PdfExporter {
     }
 
     pub fn export_pages(&self, pages: &[PageLayout], output_path: &Path) -> Result<()> {
+        self.export_pages_with_progress(pages, output_path, |_, _| {})
+    }
+
+    pub fn export_pages_with_progress<F: Fn(usize, usize)>(
+        &self,
+        pages: &[PageLayout],
+        output_path: &Path,
+        progress: F,
+    ) -> Result<()> {
         let mut doc = PdfDocument::new(&format!("TCG Layout - {} pages", pages.len()));
         let mut warnings = Vec::new();
 
@@ -32,7 +41,7 @@ impl PdfExporter {
 
         let mut pdf_pages = Vec::new();
 
-        for page in pages {
+        for (page_idx, page) in pages.iter().enumerate() {
             let mut ops = Vec::new();
 
             // Draw cut marks first (background)
@@ -98,6 +107,7 @@ impl PdfExporter {
             }
 
             pdf_pages.push(PdfPage::new(Mm(page_width), Mm(page_height), ops));
+            progress(page_idx + 1, pages.len());
         }
 
         let save_opts = PdfSaveOptions {
@@ -208,8 +218,18 @@ pub fn export_pages_to_pdf(
     params: &LayoutParams,
     output_path: &Path,
 ) -> Result<()> {
+    export_pages_to_pdf_with_progress(pages, params, output_path, |_, _| {})
+}
+
+/// Utility function to export pages to a PDF file with progress callback
+pub fn export_pages_to_pdf_with_progress<F: Fn(usize, usize)>(
+    pages: &[PageLayout],
+    params: &LayoutParams,
+    output_path: &Path,
+    progress: F,
+) -> Result<()> {
     let exporter = PdfExporter::new(params.clone());
-    exporter.export_pages(pages, output_path)
+    exporter.export_pages_with_progress(pages, output_path, progress)
 }
 
 #[cfg(test)]
@@ -352,5 +372,46 @@ mod tests {
 
         let bytes = std::fs::read(&output_path).unwrap();
         assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_export_with_progress_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let img_path = temp_dir.path().join("test_card.png");
+        let img = ::image::ImageBuffer::from_fn(100, 140, |_, _| ::image::Rgba([255u8, 0, 0, 255]));
+        img.save(&img_path).unwrap();
+
+        let params = create_test_params();
+        let pages = vec![
+            PageLayout {
+                page_number: 1,
+                cards: vec![(Card::new(img_path.clone()), CardPosition { x: 5.0, y: 5.0 })],
+            },
+            PageLayout {
+                page_number: 2,
+                cards: vec![(Card::new(img_path), CardPosition { x: 5.0, y: 5.0 })],
+            },
+        ];
+
+        let progress_count = Arc::new(AtomicUsize::new(0));
+        let progress_count_clone = progress_count.clone();
+
+        let output_path = temp_dir.path().join("progress_test.pdf");
+        let result = export_pages_to_pdf_with_progress(
+            &pages,
+            &params,
+            &output_path,
+            move |completed, total| {
+                assert_eq!(total, 2);
+                progress_count_clone.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(progress_count_clone.load(Ordering::SeqCst), completed);
+            },
+        );
+
+        assert!(result.is_ok(), "Export failed: {:?}", result.err());
+        assert_eq!(progress_count.load(Ordering::SeqCst), 2);
     }
 }

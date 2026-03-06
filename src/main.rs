@@ -12,10 +12,11 @@ pub mod types;
 pub mod ui;
 
 use crate::decklist::{DecklistEntry, DecklistManager, MatchedCard};
-use crate::pdf_export::export_pages_to_pdf;
+use crate::pdf_export::export_pages_to_pdf_with_progress;
 use crate::settings::{AppSettings, SettingsManager};
-use crate::svg_export::export_pages_to_single_svg;
+use crate::svg_export::export_pages_to_single_svg_with_progress;
 use eframe::egui;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use thumbnail_manager::{ThumbnailManager, ThumbnailMessage};
 use tokio::task::JoinHandle;
@@ -48,6 +49,50 @@ pub enum AIMatchingMessage {
     Failed { error: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ExportFormat {
+    Svg,
+    Pdf,
+}
+
+impl ExportFormat {
+    fn label(self) -> &'static str {
+        match self {
+            ExportFormat::Svg => "SVG",
+            ExportFormat::Pdf => "PDF",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ExportMessage {
+    Started {
+        format: ExportFormat,
+        total_pages: usize,
+    },
+    PageCompleted {
+        page_number: usize,
+    },
+    Completed {
+        format: ExportFormat,
+        output_path: PathBuf,
+        total_pages: usize,
+    },
+    Failed {
+        format: ExportFormat,
+        error: String,
+    },
+}
+
+#[derive(Default)]
+struct ExportState {
+    is_exporting: bool,
+    format: Option<ExportFormat>,
+    total_pages: usize,
+    pages_completed: usize,
+    error_message: Option<String>,
+}
+
 struct TcgLayoutApp {
     layout_params: LayoutParams,
     validation_errors: Vec<String>,
@@ -63,6 +108,9 @@ struct TcgLayoutApp {
     show_decklist_tab: bool,
     ai_matching_receiver: Option<mpsc::Receiver<AIMatchingMessage>>,
     ai_matching_task: Option<JoinHandle<()>>,
+    export_state: ExportState,
+    export_receiver: Option<mpsc::Receiver<ExportMessage>>,
+    export_task: Option<JoinHandle<()>>,
     settings_manager: SettingsManager,
     previous_bleed_enabled: bool,
     previous_bleed_mm: f32,
@@ -101,6 +149,9 @@ impl Default for TcgLayoutApp {
             show_decklist_tab: false,
             ai_matching_receiver: None,
             ai_matching_task: None,
+            export_state: ExportState::default(),
+            export_receiver: None,
+            export_task: None,
             settings_manager,
             previous_bleed_enabled: saved_settings.layout_params.enable_bleed,
             previous_bleed_mm: saved_settings.layout_params.bleed_mm,
@@ -219,11 +270,10 @@ impl TcgLayoutApp {
     }
 
     fn export_to_svg(&mut self) {
-        if self.selected_cards.is_empty() {
+        if self.selected_cards.is_empty() || self.export_state.is_exporting {
             return;
         }
 
-        // Show file save dialog
         let output_file = rfd::FileDialog::new()
             .set_title("Save SVG Layout")
             .set_file_name("card_layout.svg")
@@ -232,32 +282,12 @@ impl TcgLayoutApp {
             .save_file();
 
         if let Some(output_path) = output_file {
-            // Calculate layout and distribute cards across pages
-            let grid = layout::calculate_grid(&self.layout_params);
-            let pages = layout::distribute_cards(&self.selected_cards, &grid, &self.layout_params);
-
-            // Export all pages to single SVG file
-            match export_pages_to_single_svg(&pages, &self.layout_params, &output_path) {
-                Ok(()) => {
-                    println!(
-                        "Successfully exported {} pages to SVG: {:?}",
-                        pages.len(),
-                        output_path
-                    );
-                    // Show success message
-                    self.show_success_message = true;
-                    self.success_message_timer = 3.0;
-                }
-                Err(e) => {
-                    eprintln!("Failed to export SVG file: {e}");
-                    // Could show error dialog here
-                }
-            }
+            self.start_export(ExportFormat::Svg, output_path);
         }
     }
 
     fn export_to_pdf(&mut self) {
-        if self.selected_cards.is_empty() {
+        if self.selected_cards.is_empty() || self.export_state.is_exporting {
             return;
         }
 
@@ -269,21 +299,120 @@ impl TcgLayoutApp {
             .save_file();
 
         if let Some(output_path) = output_file {
-            let grid = layout::calculate_grid(&self.layout_params);
-            let pages = layout::distribute_cards(&self.selected_cards, &grid, &self.layout_params);
+            self.start_export(ExportFormat::Pdf, output_path);
+        }
+    }
 
-            match export_pages_to_pdf(&pages, &self.layout_params, &output_path) {
+    fn start_export(&mut self, format: ExportFormat, output_path: PathBuf) {
+        let grid = layout::calculate_grid(&self.layout_params);
+        let pages = layout::distribute_cards(&self.selected_cards, &grid, &self.layout_params);
+        let total_pages = pages.len();
+        let params = self.layout_params.clone();
+
+        let (sender, receiver) = mpsc::channel();
+        let progress_sender = sender.clone();
+
+        let task = tokio::task::spawn_blocking(move || {
+            let _ = sender.send(ExportMessage::Started {
+                format,
+                total_pages,
+            });
+
+            let result = match format {
+                ExportFormat::Svg => export_pages_to_single_svg_with_progress(
+                    &pages,
+                    &params,
+                    &output_path,
+                    |completed, _total| {
+                        let _ = progress_sender.send(ExportMessage::PageCompleted {
+                            page_number: completed,
+                        });
+                    },
+                ),
+                ExportFormat::Pdf => export_pages_to_pdf_with_progress(
+                    &pages,
+                    &params,
+                    &output_path,
+                    |completed, _total| {
+                        let _ = progress_sender.send(ExportMessage::PageCompleted {
+                            page_number: completed,
+                        });
+                    },
+                ),
+            };
+
+            match result {
                 Ok(()) => {
+                    let _ = sender.send(ExportMessage::Completed {
+                        format,
+                        output_path,
+                        total_pages,
+                    });
+                }
+                Err(e) => {
+                    let _ = sender.send(ExportMessage::Failed {
+                        format,
+                        error: e.to_string(),
+                    });
+                }
+            }
+        });
+
+        self.export_state = ExportState {
+            is_exporting: true,
+            format: Some(format),
+            total_pages,
+            pages_completed: 0,
+            error_message: None,
+        };
+        self.export_receiver = Some(receiver);
+        self.export_task = Some(task);
+    }
+
+    fn process_export_messages(&mut self) {
+        let mut messages = Vec::new();
+
+        if let Some(receiver) = &self.export_receiver {
+            while let Ok(message) = receiver.try_recv() {
+                messages.push(message);
+            }
+        }
+
+        for message in messages {
+            match message {
+                ExportMessage::Started {
+                    format,
+                    total_pages,
+                } => {
+                    self.export_state.is_exporting = true;
+                    self.export_state.format = Some(format);
+                    self.export_state.total_pages = total_pages;
+                    self.export_state.pages_completed = 0;
+                }
+                ExportMessage::PageCompleted { page_number } => {
+                    self.export_state.pages_completed = page_number;
+                }
+                ExportMessage::Completed {
+                    format,
+                    output_path,
+                    total_pages,
+                } => {
                     println!(
-                        "Successfully exported {} pages to PDF: {:?}",
-                        pages.len(),
-                        output_path
+                        "Successfully exported {total_pages} pages to {}: {output_path:?}",
+                        format.label(),
                     );
+                    self.export_state = ExportState::default();
+                    self.export_receiver = None;
+                    self.export_task = None;
                     self.show_success_message = true;
                     self.success_message_timer = 3.0;
                 }
-                Err(e) => {
-                    eprintln!("Failed to export PDF file: {e}");
+                ExportMessage::Failed { format, error } => {
+                    eprintln!("Failed to export {} file: {error}", format.label());
+                    self.export_state.is_exporting = false;
+                    self.export_state.error_message = Some(error);
+                    self.export_receiver = None;
+                    self.export_task = None;
                 }
             }
         }
@@ -392,8 +521,14 @@ impl eframe::App for TcgLayoutApp {
         // Process AI matching messages
         self.process_ai_matching_messages();
 
+        // Process export messages
+        self.process_export_messages();
+
         // Request repaint if we have pending thumbnails or AI matching to keep UI updating
-        if self.thumbnail_manager.has_pending_requests() || self.decklist_state.is_processing {
+        if self.thumbnail_manager.has_pending_requests()
+            || self.decklist_state.is_processing
+            || self.export_state.is_exporting
+        {
             ctx.request_repaint();
         }
 
@@ -413,11 +548,18 @@ impl eframe::App for TcgLayoutApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Export to SVG...").clicked() {
+                    let export_enabled = !self.export_state.is_exporting;
+                    if ui
+                        .add_enabled(export_enabled, egui::Button::new("Export to SVG..."))
+                        .clicked()
+                    {
                         self.export_to_svg();
                         ui.close_menu();
                     }
-                    if ui.button("Export to PDF...").clicked() {
+                    if ui
+                        .add_enabled(export_enabled, egui::Button::new("Export to PDF..."))
+                        .clicked()
+                    {
                         self.export_to_pdf();
                         ui.close_menu();
                     }
@@ -581,6 +723,53 @@ impl eframe::App for TcgLayoutApp {
                 &mut self.preview_state,
             );
         });
+
+        // Export progress overlay
+        if self.export_state.is_exporting {
+            egui::Window::new("Exporting...")
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    let format_name = self
+                        .export_state
+                        .format
+                        .map_or("Export", ExportFormat::label);
+                    ui.heading(format!("Exporting {format_name}..."));
+                    ui.add_space(8.0);
+                    let progress = if self.export_state.total_pages > 0 {
+                        self.export_state.pages_completed as f32
+                            / self.export_state.total_pages as f32
+                    } else {
+                        0.0
+                    };
+                    ui.add(egui::ProgressBar::new(progress).text(format!(
+                        "Page {} of {}",
+                        self.export_state.pages_completed, self.export_state.total_pages
+                    )));
+                });
+        }
+
+        // Export error dialog
+        if self.export_state.error_message.is_some() {
+            let mut dismiss = false;
+            egui::Window::new("Export Failed")
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    if let Some(error) = &self.export_state.error_message {
+                        ui.label(error);
+                    }
+                    ui.add_space(8.0);
+                    if ui.button("OK").clicked() {
+                        dismiss = true;
+                    }
+                });
+            if dismiss {
+                self.export_state.error_message = None;
+            }
+        }
 
         // Show success snackbar
         if self.show_success_message {
