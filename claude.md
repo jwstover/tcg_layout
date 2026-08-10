@@ -15,7 +15,7 @@ Desktop application that automatically lays out Trading Card Game (TCG) card ima
 
 ### Build Commands
 - `cargo run --bin tcg_layout` - Run the application
-- `cargo test` - Run all tests (78 tests across all modules)
+- `cargo test` - Run all tests (~260 test executions; shared modules run in both the lib and bin trees)
 - `cargo clippy` - Run linter checks
 - `cargo fmt` - Format code
 
@@ -48,9 +48,11 @@ src/
   image_processing.rs  - Thumbnail generation, DPI extraction from EXIF
   image.rs             - Image metadata, format detection, card type detection by aspect ratio
   bleed.rs             - Bleed edge extension using Gaussian blur on edges/corners
+  sharpen.rs           - Unsharp mask sharpening with adjustable amount
+  color_adjust.rs      - Targeted HSL adjustments (hue band + feather + chroma gating, front/back scope) and dropper color sampling
   thumbnail_manager.rs - Async thumbnail loading with LRU cache and file mod-time tracking
-  svg_export.rs        - SVG export with cut marks, bleed, multi-page Inkscape layers
-  pdf_export.rs        - PDF export with image deduplication, DPI scaling, bleed support
+  svg_export.rs        - SVG export with cut marks, bleed/sharpen processing, multi-page Inkscape layers
+  pdf_export.rs        - PDF export with image deduplication, DPI scaling, bleed/sharpen support
   settings.rs          - Settings persistence to ~/.config/tcg_layout/settings.json
   decklist.rs          - Decklist parsing and AI-powered card-to-file matching via OpenAI
   style.rs             - Custom dark mode theme configuration
@@ -60,6 +62,8 @@ src/
     card_list_panel.rs  - Card import, removal, reordering, copy count management
     preview_panel.rs    - Grid preview with actual thumbnails and page navigation
     decklist_panel.rs   - Decklist text input, AI matching trigger, result application
+    sharpen_preview.rs  - Full-resolution sharpen preview window with async processing
+    color_adjust_preview.rs - Color adjustment editor window with dropper sampling, live preview, and front/back navigation
   bin/
     layout_demo.rs     - Demonstrates 4 layout scenarios with utilization stats
     image_metadata.rs  - CLI utility for extracting image info
@@ -80,7 +84,15 @@ struct LayoutParams {
     target_dpi: u32,                 // Target DPI for export
     bleed_mm: f32,                   // Bleed amount in mm
     enable_bleed: bool,              // Whether bleed is active
+    sharpen_amount: f32,             // Unsharp mask strength (0.0-3.0, serde default 1.0)
+    enable_sharpen: bool,            // Whether sharpening is active (serde default false)
     center_layout: bool,             // Center cards on page (ignores margins)
+    hsl_adjustments: Vec<HslAdjustment>, // Targeted color adjustments (serde default empty)
+    enable_color_adjust: bool,       // Whether color adjustments are active (serde default false)
+    enable_duplex: bool,             // Double-sided: generate a back page after each front page (serde default false)
+    flip_edge: FlipEdge,             // LongEdge or ShortEdge; mirror axis for back pages (serde default LongEdge)
+    back_offset: (f32, f32),         // (x, y) mm shift on back pages for printer duplex calibration (serde default 0,0)
+    default_back_path: Option<PathBuf>, // Back image used when a card has no specific back (serde default None)
 }
 ```
 
@@ -92,8 +104,10 @@ struct Card {
     original_dpi: Option<u32>,
     needs_scaling: bool,
     copy_count: u32,                  // Number of copies (default 1)
+    back_path: Option<PathBuf>,       // Per-card back image (overrides default_back_path)
 }
 ```
+`Card::new(path)` reads DPI from disk; `Card::placeholder(path)` does no I/O (used for generated back slots).
 
 **GridLayout** (`types.rs`) - Result of grid calculation:
 ```rust
@@ -110,6 +124,7 @@ struct GridLayout {
 struct PageLayout {
     page_number: usize,
     cards: Vec<(Card, CardPosition)>,
+    side: PageSide,  // Front or Back (always Front when duplex is off)
 }
 ```
 
@@ -117,6 +132,8 @@ struct PageLayout {
 - `Margins` - top/right/bottom/left with `uniform()` and `Default` constructors
 - `FillOrder` - `RowMajor` or `ColumnMajor` enum
 - `PageOrientation` - `Portrait` or `Landscape` enum
+- `FlipEdge` - `LongEdge` or `ShortEdge` duplex flip axis (serializable)
+- `PageSide` - `Front` or `Back`, defaults to `Front`
 - `CardPosition` - x/y coordinates in mm
 - `DpiWarning` - warning info for low-DPI cards
 - `CutMark` / `CutMarkType` - cut mark positions and types for print
@@ -130,7 +147,10 @@ struct PageLayout {
 
 **1. Layout Calculator** (`layout.rs` - pure functions, no side effects)
 - `calculate_grid(params)` -> `GridLayout` - Determines rows/cols from page constraints. When centering is enabled, margins are ignored for grid calculation. Handles portrait/landscape. Ensures minimum 1x1 grid.
-- `distribute_cards(cards, params)` -> `Vec<PageLayout>` - Expands cards by copy_count, chunks into pages, calculates positions per card.
+- `distribute_cards(cards, params)` -> `Vec<PageLayout>` - Expands cards by copy_count, chunks into pages, calculates positions per card. Delegates to `distribute_cards_with_backs` with an empty back map.
+- `distribute_cards_with_backs(cards, grid, params, back_cards)` -> `Vec<PageLayout>` - Same, but when `enable_duplex` is on, emits a `PageSide::Back` page after every front page (interleaved for duplex printing). Back slots use `card.back_path` falling back to `params.default_back_path`; cards with neither leave a gap, and an empty back page is still emitted to preserve front/back pairing. `back_cards: &HashMap<PathBuf, Card>` supplies thumbnail-loaded Card instances (missing paths get `Card::placeholder`).
+- `mirror_position_for_back(position, params)` -> `CardPosition` - Mirrors a front position onto the back page for the configured flip edge (long-edge flip mirrors x on portrait pages, y on landscape; short-edge is the opposite), then adds `back_offset`. The axis decision lives in `LayoutParams::back_mirror_is_horizontal()`.
+- When the mirror is vertical (horizontal-axis flip), back images must also print rotated 180° or cut cards come out head-to-toe. `LayoutParams::backs_rotated_180()` encodes this; exporters and the preview rotate back-page images when `page.side == Back && backs_rotated_180()` (PDF rotates pixels via `image::rotate180` with the dedup cache keyed by `(path, rotated)`; SVG uses a `rotate(180 cx cy)` transform; the preview inverts texture UVs).
 - `calculate_card_position(index, grid, params)` -> `CardPosition` - Computes x,y for a card at a given index. Uses effective_margins() and respects fill order.
 - `generate_positions(grid, params)` -> `Vec<CardPosition>` - All positions for one page.
 - `calculate_cut_marks(grid, params)` -> `Vec<CutMark>` - Generates vertical and horizontal cut marks at card edges, extending to page boundaries.
@@ -138,7 +158,8 @@ struct PageLayout {
 **2. Thumbnail Manager** (`thumbnail_manager.rs`)
 - Async background loading via tokio::spawn with blocking tasks
 - LRU cache with configurable capacity (default 100, app uses 200)
-- Cache key includes: path, file modification time, bleed_enabled, bleed_mm (rounded)
+- Requests take a `ThumbnailParams` struct (defined in `image_processing.rs`, built via `ThumbnailParams::from_layout()`) carrying bleed, sharpen, and card size settings
+- Cache key includes: path, file modification time, bleed_enabled, bleed_mm (rounded to tenths), sharpen_enabled, sharpen_amount (rounded to hundredths)
 - Avoids duplicate requests for the same file
 - Message-passing architecture: `ThumbnailRequest` -> background task -> `ThumbnailMessage`
 - Key methods: `request_thumbnail()`, `try_recv_message()`, `cache_stats()`, `clear_cache()`
@@ -149,6 +170,24 @@ struct PageLayout {
 - Uses Gaussian blur on edge strips for smooth bleed transitions
 - Handles edges (top/bottom/left/right) and corners separately
 - `calculate_bleed_pixels_from_dimensions()` - Converts bleed_mm to pixel count based on actual image dimensions vs card_size
+- `apply_bleed_to_image()` - Applies bleed to an already-loaded DynamicImage (used when sharpening runs first)
+
+**3c. Color Adjustment System** (`color_adjust.rs`)
+- `HslAdjustment` struct: `target_hue` (0-360°), `hue_range` (full-effect half-width), `feather` (smoothstep falloff beyond the band), `hue_shift` (±180°), `saturation_shift` / `lightness_shift` (±1.0, additive), `enabled` (toggle without deleting; serde default true), `scope` (`AdjustmentScope`: All / FrontsOnly / BacksOnly; serde default All). `is_active()` = enabled && has a non-zero shift; `is_active_for(is_back)` also checks scope — exporters use the latter
+- `AdjustmentScope` limits an adjustment to card fronts or duplex back images. `adjustments_for_side(adjs, is_back)` filters the list before applying. Exporters are side-aware: the PDF dedup cache key adds an is_back component (only when some active adjustment is side-scoped), and SVG back images processed with side-scoped adjustments get a `{stem}_back_processed.png` filename so a same-file front/back can't collide. A backs-only adjustment leaves fronts completely unprocessed (original file references / raw bytes)
+- `apply_hsl_adjustments()` for RGBA buffers, `apply_hsl_adjustments_to_image()` for DynamicImage (export). One HSL conversion per pixel; all adjustments applied in that single pass so multiple adjustments don't accumulate quantization error
+- Weight = hue-band falloff × chroma gate: circular hue distance handles the 0°/360° red seam; the chroma gate (dead zone at 0.03, full effect at 0.12) fades the effect near neutral — gray, near-black, and near-white alike. HSL saturation is deliberately NOT the gate metric (it saturates to 1.0 near black/white)
+- `sample_region()` implements the dropper: chroma-weighted circular mean hue over a small patch, plus a `suggested_range` derived from the circular spread
+- **Intentionally NOT applied to thumbnails** — no `ThumbnailManager`/`CacheKey` involvement. The effect is visible only in the editor window (`ui/color_adjust_preview.rs`) and in exports
+- Editor window mirrors the sharpen preview pattern (2048px cap, one task in flight, latest adjustments win) with add/remove adjustment rows, per-row scope dropdown, a "Pick" dropper mode (click the image to set target hue + range, live hover swatch), hold-to-compare, zoom, "Apply adjustments". It pages through all unique card fronts then all unique backs (◀/▶, wrapping) via `PreviewEntry { path, is_back }`; a `generation` counter discards late results from a previous image, and only adjustments whose scope covers the current side are applied to the preview
+- Export order everywhere: **color adjust → sharpen → bleed** (color ops see original colors, bleed derives from the fully processed image)
+
+**3b. Sharpening System** (`sharpen.rs`)
+- Unsharp mask: `result = original + amount * (original - blur(original, sigma))`
+- `apply_sharpen_to_buffer()` for RGBA buffers (thumbnails, preview), `apply_sharpen()` for DynamicImage (export)
+- `MAX_SHARPEN_AMOUNT` (3.0) bounds the UI slider and validation
+- Order of operations everywhere: **sharpen first, then bleed** (so bleed strips derive from the sharpened image)
+- Full-resolution preview window (`ui/sharpen_preview.rs`): loads first card capped at 2048px, re-sharpens async on slider change (one task in flight, latest amount wins), hold-to-compare with original, zoom, "Apply to all cards" commits the amount to `layout_params`
 
 **4. Image Processing** (`image_processing.rs` + `image.rs`)
 - `generate_thumbnail()` - Creates RGBA8 thumbnail preserving aspect ratio
@@ -159,8 +198,8 @@ struct PageLayout {
 - `detect_card_type_by_aspect_ratio()` - Matches image aspect ratio to known card types
 
 **5. Export Pipeline**
-- **SVG** (`svg_export.rs`): `SvgExporter` with `export_page()`, `export_pages()`, `export_pages_single_file()`. Supports cut marks, bleed (processes images into `{name}_bleed/` directory), multi-page with Inkscape layer definitions. Uses file:// URI image references (not embedded).
-- **PDF** (`pdf_export.rs`): `PdfExporter` with `export_pages()`. Uses printpdf 0.9. Features image deduplication via HashMap cache, intelligent DPI calculation to fill card width, Y-axis correction (PDF origin is bottom-left), aspect ratio correction via scale_y, bleed image processing (encoded to PNG in-memory), cut marks (gray 0.5pt lines), Flate compression.
+- **SVG** (`svg_export.rs`): `SvgExporter` with `export_page()`, `export_pages()`, `export_pages_single_file()`. Supports cut marks, bleed/sharpen (when either is active, processes images into a `{name}_images/` directory as `{stem}_processed.png`), multi-page with Inkscape layer definitions. Unprocessed images use file:// URI references (not embedded).
+- **PDF** (`pdf_export.rs`): `PdfExporter` with `export_pages()`. Uses printpdf 0.9. Features image deduplication via HashMap cache, intelligent DPI calculation to fill card width, Y-axis correction (PDF origin is bottom-left), aspect ratio correction via scale_y, bleed/sharpen image processing via `prepare_processed_image()` (encoded to PNG in-memory), cut marks (gray 0.5pt lines), Flate compression.
 
 **6. Settings** (`settings.rs`)
 - Persists to `~/.config/tcg_layout/settings.json`
@@ -179,7 +218,8 @@ struct PageLayout {
 - `TcgLayoutApp` is the main application struct implementing `eframe::App`
 - Three-panel layout: Left (card list + decklist), Center (preview), Right (parameters)
 - Polls for async messages each frame: thumbnail results, AI matching results
-- Bleed setting changes trigger texture cache clear and full thumbnail re-request
+- Bleed or sharpen setting changes trigger texture cache clear and full thumbnail re-request
+- Sharpen preview window state (`SharpenPreviewState`) lives on `TcgLayoutApp`; "Apply to all cards" sets `layout_params.sharpen_amount` + `enable_sharpen` and saves settings
 - Custom dark theme defined in `style.rs`
 
 ### Application State Flow
@@ -206,11 +246,14 @@ struct PageLayout {
 - Row-major and column-major fill orders
 - Portrait and landscape page orientations
 - Async thumbnail loading with LRU cache (mod-time aware)
-- SVG export with image references, cut marks, bleed, multi-page Inkscape layers
-- PDF export with image deduplication, DPI scaling, bleed, cut marks
+- SVG export with image references, cut marks, bleed, sharpening, multi-page Inkscape layers
+- PDF export with image deduplication, DPI scaling, bleed, sharpening, cut marks
 - Bleed system with Gaussian blur edge extension
+- Sharpening (unsharp mask) with adjustable amount and full-resolution single-card preview window
+- Targeted HSL color adjustments with dropper sampling, per-adjustment front/back scope, and full-resolution editor window that cycles through all fronts and backs (export-only; not in thumbnails)
 - Cut marks generation
 - Layout centering (ignores margins, centers grid on page)
+- Double-sided (duplex) printing: interleaved back pages with mirrored positions (flip-edge aware), automatic 180° back rotation when the flip axis requires it (cards always cut head-to-head), per-card and default back images, printer calibration offset, front-only cut marks
 - Settings persistence (JSON file + secure keyring for API key)
 - Decklist parsing and AI-powered card-to-file matching (OpenAI)
 - Card reordering in the UI
@@ -223,12 +266,13 @@ struct PageLayout {
 - Mixed card sizes within a single layout
 - Layout templates/presets
 - DPI warning display in the UI (detection works, UI display not wired up)
+- Duplex calibration test sheet (front/back page pair with ruled markers to measure printer offset directly)
 
 ## Testing
 
 ### Test Structure
 - Unit tests colocated in each module using `#[cfg(test)]`
-- 78 tests total across all modules
+- ~260 test executions total (shared modules compile into both lib and bin trees)
 - Async tests in `thumbnail_manager.rs` use tokio runtime
 
 ### Running Tests
@@ -244,13 +288,15 @@ cargo test settings           # Settings persistence tests
 ```
 
 ### Test Coverage Areas
-- Layout grid calculations (29 tests): grid sizing, distribution, positions, centering, cut marks
+- Layout grid calculations (39 tests): grid sizing, distribution, positions, centering, cut marks, duplex mirroring/interleaving
 - Image processing (6 tests): thumbnails, aspect ratio, DPI
 - Bleed (11 tests): pixel calculations, edge replication, zero bleed
-- Thumbnail manager (7 tests): async loading, caching, deduplication
-- SVG export (11 tests): single/multi-page, cut marks, bleed
-- PDF export (6 tests): multi-page, real images
-- Settings (4 tests): serialization, defaults
+- Sharpen (8 tests): identity at zero, flat-image invariance, edge contrast, alpha preservation
+- Color adjust (25 tests): RGB↔HSL round trip, chroma recovery, noop/empty identity, gray and near-black/near-white invariance, hue targeting and wraparound, feather bounds, alpha preservation, scope filtering (per-side activity, legacy JSON defaults to All), dropper sampling (circular mean, seam, gray, near-black noise rejection, bounds)
+- Thumbnail manager (7 tests): async loading, caching, deduplication, cache key discrimination
+- SVG export (20 tests): single/multi-page, cut marks (front pages only), bleed, sharpening, processed image directory, backs-only adjustment scoping
+- PDF export (13 tests): multi-page, real images, sharpening, sharpening + bleed, duplex end-to-end, backs-only adjustment scoping
+- Settings (5 tests): serialization, defaults, duplex backwards compatibility
 - Types (various): enum behavior, defaults, validation
 
 ## Common Development Tasks
@@ -308,8 +354,8 @@ cargo test settings           # Settings persistence tests
 
 ### Thumbnail Cache Invalidation
 - Cache keys include file modification time, so editing an image file on disk automatically invalidates its cache entry
-- Bleed settings (enabled + mm amount) are part of the cache key - changing bleed triggers full cache miss
-- The app must call `clear_cache()` and re-request thumbnails when bleed settings change (done in `main.rs`)
+- Bleed settings (enabled + mm amount) and sharpen settings (enabled + amount) are part of the cache key - changing either triggers full cache miss
+- The app clears the texture cache and re-requests thumbnails when bleed or sharpen settings change (`thumbnails_outdated` check in `main.rs`)
 
 ### Image Deduplication in PDF Export
 - PDF exporter maintains a `HashMap<PathBuf, (printpdf::Image, dimensions)>` to avoid embedding the same image multiple times (important when copy_count > 1)
