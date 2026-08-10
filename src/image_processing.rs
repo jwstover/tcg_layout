@@ -2,16 +2,50 @@ use anyhow::Result;
 use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageBuffer, Rgba};
 use std::path::Path;
 
-use tcg_layout::bleed;
+use tcg_layout::{bleed, sharpen};
 
 const THUMBNAIL_WIDTH: u32 = 150;
 const THUMBNAIL_HEIGHT: u32 = 200;
 
+/// Settings that affect thumbnail generation.
+/// These are part of the thumbnail cache key - changing any of them
+/// invalidates cached thumbnails.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThumbnailParams {
+    pub bleed_mm: f32,
+    pub enable_bleed: bool,
+    pub sharpen_amount: f32,
+    pub enable_sharpen: bool,
+    pub card_size_mm: (f32, f32),
+}
+
+impl ThumbnailParams {
+    pub fn from_layout(params: &crate::types::LayoutParams) -> Self {
+        Self {
+            bleed_mm: params.bleed_mm,
+            enable_bleed: params.enable_bleed,
+            sharpen_amount: params.sharpen_amount,
+            enable_sharpen: params.enable_sharpen,
+            card_size_mm: params.card_size,
+        }
+    }
+}
+
+impl Default for ThumbnailParams {
+    fn default() -> Self {
+        Self {
+            bleed_mm: 0.0,
+            enable_bleed: false,
+            sharpen_amount: 1.0,
+            enable_sharpen: false,
+            card_size_mm: (63.0, 88.0),
+        }
+    }
+}
+
 pub fn generate_thumbnail(
     image_path: &Path,
-    bleed_mm: f32,
-    enable_bleed: bool,
-    card_size_mm: (f32, f32),
+    params: &ThumbnailParams,
 ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
     // Load the image
     let img = image::open(image_path)?;
@@ -22,12 +56,18 @@ pub fn generate_thumbnail(
     // Convert to RGBA for consistent handling
     let mut thumbnail_rgba = thumbnail.to_rgba8();
 
+    // Apply sharpening before bleed so bleed strips derive from the
+    // sharpened image (and the blurred bleed region stays smooth)
+    if params.enable_sharpen && params.sharpen_amount > 0.0 {
+        thumbnail_rgba = sharpen::apply_sharpen_to_buffer(&thumbnail_rgba, params.sharpen_amount);
+    }
+
     // Apply bleed if enabled
-    if enable_bleed && bleed_mm > 0.0 {
+    if params.enable_bleed && params.bleed_mm > 0.0 {
         let (thumb_width, _) = thumbnail_rgba.dimensions();
 
         // Calculate bleed as proportion of card size
-        let bleed_fraction = bleed_mm / card_size_mm.0;
+        let bleed_fraction = params.bleed_mm / params.card_size_mm.0;
         let thumbnail_bleed_px = (bleed_fraction * thumb_width as f32).round() as u32;
 
         thumbnail_rgba = bleed::apply_bleed_to_thumbnail(&thumbnail_rgba, thumbnail_bleed_px);
@@ -107,7 +147,7 @@ mod tests {
     fn test_generate_thumbnail_preserves_aspect_ratio() {
         let temp_file = create_test_image(300, 600); // 1:2 aspect ratio
 
-        let thumbnail = generate_thumbnail(temp_file.path(), 0.0, false, (63.0, 88.0)).unwrap();
+        let thumbnail = generate_thumbnail(temp_file.path(), &ThumbnailParams::default()).unwrap();
         let (thumb_width, thumb_height) = thumbnail.dimensions();
 
         // Should fit within 150x200 bounds
@@ -124,7 +164,7 @@ mod tests {
     fn test_generate_thumbnail_wide_image() {
         let temp_file = create_test_image(600, 300); // 2:1 aspect ratio
 
-        let thumbnail = generate_thumbnail(temp_file.path(), 0.0, false, (63.0, 88.0)).unwrap();
+        let thumbnail = generate_thumbnail(temp_file.path(), &ThumbnailParams::default()).unwrap();
         let (thumb_width, thumb_height) = thumbnail.dimensions();
 
         // Should fit within 150x200 bounds
@@ -141,7 +181,7 @@ mod tests {
     fn test_generate_thumbnail_square_image() {
         let temp_file = create_test_image(400, 400); // 1:1 aspect ratio
 
-        let thumbnail = generate_thumbnail(temp_file.path(), 0.0, false, (63.0, 88.0)).unwrap();
+        let thumbnail = generate_thumbnail(temp_file.path(), &ThumbnailParams::default()).unwrap();
         let (thumb_width, thumb_height) = thumbnail.dimensions();
 
         // Should fit within 150x200 bounds

@@ -1,7 +1,9 @@
 pub mod card_list_panel;
+pub mod color_adjust_preview;
 pub mod decklist_panel;
 pub mod parameters_panel;
 pub mod preview_panel;
+pub mod sharpen_preview;
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PageSizeOption {

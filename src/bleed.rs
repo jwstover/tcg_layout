@@ -219,8 +219,12 @@ pub fn apply_bleed_to_thumbnail(
     canvas
 }
 
-/// Apply bleed to a DynamicImage (internal helper)
-fn apply_bleed_to_image(img: &DynamicImage, bleed_pixels: u32) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+/// Apply bleed to an already-loaded DynamicImage
+/// Useful when the image has been pre-processed (e.g. sharpened) in memory
+pub fn apply_bleed_to_image(
+    img: &DynamicImage,
+    bleed_pixels: u32,
+) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     let rgba_img = img.to_rgba8();
     apply_bleed_to_thumbnail(&rgba_img, bleed_pixels)
 }

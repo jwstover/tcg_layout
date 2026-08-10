@@ -1,6 +1,7 @@
 use image::{Rgb, RgbImage};
 use std::fs;
 use std::time::Instant;
+use tcg_layout::image_processing::ThumbnailParams;
 use tcg_layout::thumbnail_manager::ThumbnailManager;
 
 #[tokio::main]
@@ -36,7 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cache_misses = 0;
 
     for path in &image_paths {
-        if let Some(_thumbnail) = manager.request_thumbnail(path.clone(), 0.0, false, (63.0, 88.0))
+        if let Some(_thumbnail) =
+            manager.request_thumbnail(path.clone(), &ThumbnailParams::default())
         {
             cache_hits += 1;
         } else {
@@ -72,7 +74,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cache_misses = 0;
 
     for path in &image_paths {
-        if let Some(_thumbnail) = manager.request_thumbnail(path.clone(), 0.0, false, (63.0, 88.0))
+        if let Some(_thumbnail) =
+            manager.request_thumbnail(path.clone(), &ThumbnailParams::default())
         {
             cache_hits += 1;
         } else {

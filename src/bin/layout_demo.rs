@@ -25,7 +25,12 @@ fn main() {
         target_dpi: 300,
         bleed_mm: 0.0,
         enable_bleed: false,
+        sharpen_amount: 1.0,
+        enable_sharpen: false,
         center_layout: false,
+        hsl_adjustments: Vec::new(),
+        enable_color_adjust: false,
+        ..Default::default()
     };
     demo_layout(custom_params, 8);
     println!();
@@ -43,7 +48,12 @@ fn main() {
         target_dpi: 300,
         bleed_mm: 0.0,
         enable_bleed: false,
+        sharpen_amount: 1.0,
+        enable_sharpen: false,
         center_layout: false,
+        hsl_adjustments: Vec::new(),
+        enable_color_adjust: false,
+        ..Default::default()
     };
     demo_layout(tight_params, 12);
     println!();
@@ -61,7 +71,12 @@ fn main() {
         target_dpi: 300,
         bleed_mm: 0.0,
         enable_bleed: false,
+        sharpen_amount: 1.0,
+        enable_sharpen: false,
         center_layout: false,
+        hsl_adjustments: Vec::new(),
+        enable_color_adjust: false,
+        ..Default::default()
     };
     demo_layout(landscape_params, 12);
 }
