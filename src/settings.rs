@@ -6,16 +6,27 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+pub fn default_marvel_champions_dir() -> PathBuf {
+    dirs::picture_dir()
+        .unwrap_or_else(|| PathBuf::from("~/Pictures"))
+        .join("Marvel Champions")
+}
+
 const APP_NAME: &str = "tcg_layout";
 const SETTINGS_FILE: &str = "settings.json";
 const KEYRING_SERVICE: &str = "tcg_layout";
 const OPENAI_KEY_USERNAME: &str = "openai_api_key";
+const GOOGLE_DRIVE_KEY_USERNAME: &str = "google_drive_api_key";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub layout_params: LayoutParams,
     pub page_size_option: PageSizeOption,
     pub card_size_option: CardSizeOption,
+    #[serde(default)]
+    pub marvel_champions_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub google_drive_folder_id: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -24,6 +35,8 @@ impl Default for AppSettings {
             layout_params: LayoutParams::default(),
             page_size_option: PageSizeOption::A4,
             card_size_option: CardSizeOption::Poker,
+            marvel_champions_dir: None,
+            google_drive_folder_id: None,
         }
     }
 }
@@ -31,6 +44,7 @@ impl Default for AppSettings {
 pub struct SettingsManager {
     settings_path: PathBuf,
     keyring_entry: Entry,
+    google_drive_keyring_entry: Entry,
 }
 
 impl SettingsManager {
@@ -46,10 +60,12 @@ impl SettingsManager {
 
         let settings_path = config_dir.join(SETTINGS_FILE);
         let keyring_entry = Entry::new(KEYRING_SERVICE, OPENAI_KEY_USERNAME)?;
+        let google_drive_keyring_entry = Entry::new(KEYRING_SERVICE, GOOGLE_DRIVE_KEY_USERNAME)?;
 
         Ok(Self {
             settings_path,
             keyring_entry,
+            google_drive_keyring_entry,
         })
     }
 
@@ -125,6 +141,41 @@ impl SettingsManager {
         }
     }
 
+    pub fn load_google_drive_api_key(&self) -> Option<String> {
+        match self.google_drive_keyring_entry.get_password() {
+            Ok(password) => Some(password),
+            Err(keyring::Error::NoEntry) => {
+                log::debug!("No Google Drive API key found in keyring");
+                None
+            }
+            Err(e) => {
+                log::warn!("Failed to load Google Drive API key from keyring: {e}");
+                None
+            }
+        }
+    }
+
+    pub fn save_google_drive_api_key(&self, api_key: &str) -> Result<()> {
+        if api_key.trim().is_empty() {
+            match self.google_drive_keyring_entry.delete_password() {
+                Ok(()) => log::debug!("Google Drive API key deleted from keyring"),
+                Err(keyring::Error::NoEntry) => {
+                    log::debug!("No Google Drive API key to delete from keyring")
+                }
+                Err(e) => {
+                    return Err(anyhow!(
+                        "Failed to delete Google Drive API key from keyring: {}",
+                        e
+                    ))
+                }
+            }
+        } else {
+            self.google_drive_keyring_entry.set_password(api_key)?;
+            log::debug!("Google Drive API key saved to keyring");
+        }
+        Ok(())
+    }
+
     pub fn get_settings_path(&self) -> &PathBuf {
         &self.settings_path
     }
@@ -139,10 +190,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join(SETTINGS_FILE);
         let keyring_entry = Entry::new("test_tcg_layout", "test_key").unwrap();
+        let google_drive_keyring_entry =
+            Entry::new("test_tcg_layout", "test_google_drive_key").unwrap();
 
         let manager = SettingsManager {
             settings_path,
             keyring_entry,
+            google_drive_keyring_entry,
         };
 
         (manager, temp_dir)
@@ -184,6 +238,43 @@ mod tests {
         assert_eq!(loaded_settings.layout_params, LayoutParams::default());
         assert_eq!(loaded_settings.page_size_option, PageSizeOption::A4);
         assert_eq!(loaded_settings.card_size_option, CardSizeOption::Poker);
+    }
+
+    #[test]
+    fn test_settings_backwards_compatible_without_sharpen_fields() {
+        // Settings saved by an older version won't have the sharpen fields;
+        // they should deserialize with defaults
+        let settings = AppSettings::default();
+        let mut value = serde_json::to_value(&settings).unwrap();
+        let params = value["layout_params"].as_object_mut().unwrap();
+        params.remove("sharpen_amount");
+        params.remove("enable_sharpen");
+
+        let loaded: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.layout_params.sharpen_amount, 1.0);
+        assert!(!loaded.layout_params.enable_sharpen);
+    }
+
+    #[test]
+    fn test_settings_backwards_compatible_without_duplex_fields() {
+        // Settings saved by an older version won't have the duplex fields;
+        // they should deserialize with defaults
+        let settings = AppSettings::default();
+        let mut value = serde_json::to_value(&settings).unwrap();
+        let params = value["layout_params"].as_object_mut().unwrap();
+        params.remove("enable_duplex");
+        params.remove("flip_edge");
+        params.remove("back_offset");
+        params.remove("default_back_path");
+
+        let loaded: AppSettings = serde_json::from_value(value).unwrap();
+        assert!(!loaded.layout_params.enable_duplex);
+        assert_eq!(
+            loaded.layout_params.flip_edge,
+            crate::types::FlipEdge::LongEdge
+        );
+        assert_eq!(loaded.layout_params.back_offset, (0.0, 0.0));
+        assert_eq!(loaded.layout_params.default_back_path, None);
     }
 
     #[test]
