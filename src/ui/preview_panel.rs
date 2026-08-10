@@ -1,5 +1,5 @@
-use crate::layout::{calculate_cut_marks, calculate_grid, distribute_cards};
-use crate::types::{Card, LayoutParams, PageOrientation, ThumbnailState};
+use crate::layout::{calculate_cut_marks, calculate_grid, distribute_cards_with_backs};
+use crate::types::{Card, LayoutParams, PageOrientation, PageSide, ThumbnailState};
 use eframe::egui;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -59,6 +59,7 @@ pub fn show_preview_panel(
     ui: &mut egui::Ui,
     layout_params: &LayoutParams,
     cards: &[Card],
+    back_cards: &HashMap<PathBuf, Card>,
     preview_state: &mut PreviewState,
 ) {
     ui.heading("Preview");
@@ -75,7 +76,7 @@ pub fn show_preview_panel(
     }
 
     let grid = calculate_grid(layout_params);
-    let pages = distribute_cards(cards, &grid, layout_params);
+    let pages = distribute_cards_with_backs(cards, &grid, layout_params, back_cards);
 
     if pages.is_empty() {
         ui.colored_label(
@@ -85,9 +86,9 @@ pub fn show_preview_panel(
         return;
     }
 
-    // Ensure current page is valid
+    // Ensure current page is valid (clamp to last page if the page count shrank)
     if preview_state.current_page >= pages.len() {
-        preview_state.current_page = 0;
+        preview_state.current_page = pages.len() - 1;
     }
 
     // Page navigation
@@ -96,9 +97,22 @@ pub fn show_preview_panel(
             preview_state.current_page -= 1;
         }
 
+        let side_label = if layout_params.enable_duplex {
+            match pages[preview_state.current_page].side {
+                PageSide::Front => " (Front)",
+                PageSide::Back => " (Back)",
+            }
+        } else {
+            ""
+        };
         ui.colored_label(
             ui.visuals().text_color(),
-            format!("Page {} of {}", preview_state.current_page + 1, pages.len()),
+            format!(
+                "Page {} of {}{}",
+                preview_state.current_page + 1,
+                pages.len(),
+                side_label
+            ),
         );
 
         if ui.button("Next ▶").clicked() && preview_state.current_page < pages.len() - 1 {
@@ -149,22 +163,29 @@ pub fn show_preview_panel(
         egui::Stroke::new(2.0, ui.visuals().text_color()),
     );
 
-    // Draw cut marks
-    let cut_marks = calculate_cut_marks(layout_params, &grid);
-    for cut_mark in &cut_marks {
-        let x1 = center_x + (cut_mark.x1 * 3.0 * scale);
-        let y1 = center_y + (cut_mark.y1 * 3.0 * scale);
-        let x2 = center_x + (cut_mark.x2 * 3.0 * scale);
-        let y2 = center_y + (cut_mark.y2 * 3.0 * scale);
+    let current_page = &pages[preview_state.current_page];
 
-        ui.painter().line_segment(
-            [egui::pos2(x1, y1), egui::pos2(x2, y2)],
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(128, 128, 128)), // Gray cut marks
-        );
+    // Draw cut marks (front pages only, matching export behavior)
+    if current_page.side == PageSide::Front {
+        let cut_marks = calculate_cut_marks(layout_params, &grid);
+        for cut_mark in &cut_marks {
+            let x1 = center_x + (cut_mark.x1 * 3.0 * scale);
+            let y1 = center_y + (cut_mark.y1 * 3.0 * scale);
+            let x2 = center_x + (cut_mark.x2 * 3.0 * scale);
+            let y2 = center_y + (cut_mark.y2 * 3.0 * scale);
+
+            ui.painter().line_segment(
+                [egui::pos2(x1, y1), egui::pos2(x2, y2)],
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(128, 128, 128)), // Gray cut marks
+            );
+        }
     }
 
+    // Back pages render rotated 180° when the duplex flip is about a
+    // horizontal axis, matching export behavior (cards stay head-to-head)
+    let rotate_180 = current_page.side == PageSide::Back && layout_params.backs_rotated_180();
+
     // Draw cards for current page
-    let current_page = &pages[preview_state.current_page];
 
     for (card, position) in &current_page.cards {
         // Calculate card dimensions and position based on bleed setting
@@ -197,11 +218,18 @@ pub fn show_preview_panel(
             ThumbnailState::Loaded(_) => {
                 // Try to draw thumbnail
                 if let Some(texture) = preview_state.get_or_create_texture(ui.ctx(), card) {
+                    // Inverted UVs draw the texture rotated 180°
+                    let uv = if rotate_180 {
+                        egui::Rect::from_min_max(egui::pos2(1.0, 1.0), egui::pos2(0.0, 0.0))
+                    } else {
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+                    };
+
                     // Draw thumbnail
                     ui.painter().image(
                         texture.id(),
                         card_rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), // UV coordinates
+                        uv,
                         egui::Color32::WHITE, // Tint
                     );
 

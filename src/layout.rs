@@ -1,7 +1,9 @@
 use crate::types::{
     Card, CardPosition, CutMark, CutMarkType, FillOrder, GridLayout, LayoutParams, PageLayout,
-    PageOrientation,
+    PageOrientation, PageSide,
 };
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 pub fn calculate_grid(params: &LayoutParams) -> GridLayout {
     // Get effective page dimensions based on orientation
@@ -49,6 +51,22 @@ pub fn distribute_cards(
     grid: &GridLayout,
     params: &LayoutParams,
 ) -> Vec<PageLayout> {
+    distribute_cards_with_backs(cards, grid, params, &HashMap::new())
+}
+
+/// Distribute cards into pages. When duplex is enabled, each front page is
+/// followed by a generated back page whose card positions are mirrored for
+/// the configured flip edge and shifted by the printer calibration offset.
+///
+/// `back_cards` maps back image paths to Card instances (typically carrying
+/// loaded thumbnails); paths not in the map get placeholder Cards, which is
+/// sufficient for export since exporters load images from disk by path.
+pub fn distribute_cards_with_backs(
+    cards: &[Card],
+    grid: &GridLayout,
+    params: &LayoutParams,
+    back_cards: &HashMap<PathBuf, Card>,
+) -> Vec<PageLayout> {
     let mut pages = Vec::new();
     let mut page_number = 1;
 
@@ -75,12 +93,63 @@ pub fn distribute_cards(
         pages.push(PageLayout {
             page_number,
             cards: page_cards,
+            side: PageSide::Front,
         });
-
         page_number += 1;
+
+        if params.enable_duplex {
+            // Cards with no back (and no default back) leave a gap so the
+            // remaining backs stay aligned with their fronts.
+            let back_page_cards: Vec<(Card, CardPosition)> = chunk
+                .iter()
+                .enumerate()
+                .filter_map(|(index, card)| {
+                    let back_path = card
+                        .back_path
+                        .clone()
+                        .or_else(|| params.default_back_path.clone())?;
+                    let front_position = calculate_card_position(index, grid, params);
+                    let position = mirror_position_for_back(&front_position, params);
+                    let back_card = back_cards
+                        .get(&back_path)
+                        .cloned()
+                        .unwrap_or_else(|| Card::placeholder(back_path));
+                    Some((back_card, position))
+                })
+                .collect();
+
+            // Always emit the back page (even when empty) so front/back
+            // pairing survives duplex printing.
+            pages.push(PageLayout {
+                page_number,
+                cards: back_page_cards,
+                side: PageSide::Back,
+            });
+            page_number += 1;
+        }
     }
 
     pages
+}
+
+/// Mirror a front-page card position onto the back page so front and back
+/// align when the sheet is flipped along the configured edge, then apply the
+/// duplex calibration offset. Flipping rotates the sheet about the axis
+/// parallel to the flip edge: a vertical axis mirrors x, a horizontal one
+/// mirrors y.
+pub fn mirror_position_for_back(position: &CardPosition, params: &LayoutParams) -> CardPosition {
+    let (page_width, page_height) = params.effective_page_size();
+
+    let (x, y) = if params.back_mirror_is_horizontal() {
+        (page_width - position.x - params.card_size.0, position.y)
+    } else {
+        (position.x, page_height - position.y - params.card_size.1)
+    };
+
+    CardPosition {
+        x: x + params.back_offset.0,
+        y: y + params.back_offset.1,
+    }
 }
 
 pub fn calculate_card_position(
@@ -248,7 +317,7 @@ pub fn calculate_cut_marks(params: &LayoutParams, grid: &GridLayout) -> Vec<CutM
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FillOrder, LayoutParams, Margins, PageOrientation};
+    use crate::types::{FillOrder, FlipEdge, LayoutParams, Margins, PageOrientation};
     use std::path::PathBuf;
 
     #[test]
@@ -277,7 +346,12 @@ mod tests {
             target_dpi: 300,
             bleed_mm: 0.0,
             enable_bleed: false,
+            sharpen_amount: 1.0,
+            enable_sharpen: false,
             center_layout: false,
+            hsl_adjustments: Vec::new(),
+            enable_color_adjust: false,
+            ..Default::default()
         };
 
         let grid = calculate_grid(&params);
@@ -303,7 +377,12 @@ mod tests {
             target_dpi: 300,
             bleed_mm: 0.0,
             enable_bleed: false,
+            sharpen_amount: 1.0,
+            enable_sharpen: false,
             center_layout: false,
+            hsl_adjustments: Vec::new(),
+            enable_color_adjust: false,
+            ..Default::default()
         };
 
         let grid = calculate_grid(&params);
@@ -379,7 +458,12 @@ mod tests {
             target_dpi: 300,
             bleed_mm: 0.0,
             enable_bleed: false,
+            sharpen_amount: 1.0,
+            enable_sharpen: false,
             center_layout: false,
+            hsl_adjustments: Vec::new(),
+            enable_color_adjust: false,
+            ..Default::default()
         };
 
         let grid = GridLayout {
@@ -419,7 +503,12 @@ mod tests {
             target_dpi: 300,
             bleed_mm: 0.0,
             enable_bleed: false,
+            sharpen_amount: 1.0,
+            enable_sharpen: false,
             center_layout: false,
+            hsl_adjustments: Vec::new(),
+            enable_color_adjust: false,
+            ..Default::default()
         };
 
         let grid = GridLayout {
@@ -473,7 +562,12 @@ mod tests {
             target_dpi: 300,
             bleed_mm: 0.0,
             enable_bleed: false,
+            sharpen_amount: 1.0,
+            enable_sharpen: false,
             center_layout: false,
+            hsl_adjustments: Vec::new(),
+            enable_color_adjust: false,
+            ..Default::default()
         };
 
         let grid = calculate_grid(&params);
@@ -536,7 +630,12 @@ mod tests {
             target_dpi: 300,
             bleed_mm: 0.0,
             enable_bleed: false,
+            sharpen_amount: 1.0,
+            enable_sharpen: false,
             center_layout: true, // Centering enabled
+            hsl_adjustments: Vec::new(),
+            enable_color_adjust: false,
+            ..Default::default()
         };
 
         let grid = calculate_grid(&params);
@@ -590,6 +689,209 @@ mod tests {
         // Fourth card (row 1, col 1) should be at (51, 76.5)
         assert_eq!(positions[3].x, 51.0);
         assert_eq!(positions[3].y, 76.5);
+    }
+
+    fn duplex_test_params() -> LayoutParams {
+        LayoutParams {
+            page_size: (100.0, 150.0),
+            card_size: (20.0, 30.0),
+            margins: Margins::uniform(5.0),
+            spacing: (2.0, 3.0),
+            enable_duplex: true,
+            default_back_path: Some(PathBuf::from("default_back.png")),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_mirror_position_long_edge_portrait_mirrors_x() {
+        let params = duplex_test_params();
+        // Portrait 100x150: long edge is vertical, so x mirrors
+        let position = CardPosition { x: 5.0, y: 40.0 };
+        let mirrored = mirror_position_for_back(&position, &params);
+        assert_eq!(mirrored.x, 100.0 - 5.0 - 20.0); // 75.0
+        assert_eq!(mirrored.y, 40.0);
+    }
+
+    #[test]
+    fn test_mirror_position_short_edge_portrait_mirrors_y() {
+        let params = LayoutParams {
+            flip_edge: FlipEdge::ShortEdge,
+            ..duplex_test_params()
+        };
+        let position = CardPosition { x: 5.0, y: 40.0 };
+        let mirrored = mirror_position_for_back(&position, &params);
+        assert_eq!(mirrored.x, 5.0);
+        assert_eq!(mirrored.y, 150.0 - 40.0 - 30.0); // 80.0
+    }
+
+    #[test]
+    fn test_mirror_position_long_edge_landscape_mirrors_y() {
+        let params = LayoutParams {
+            page_orientation: PageOrientation::Landscape,
+            ..duplex_test_params()
+        };
+        // Landscape: effective page is 150x100, long edge is horizontal, so y mirrors
+        let position = CardPosition { x: 5.0, y: 40.0 };
+        let mirrored = mirror_position_for_back(&position, &params);
+        assert_eq!(mirrored.x, 5.0);
+        assert_eq!(mirrored.y, 100.0 - 40.0 - 30.0); // 30.0
+    }
+
+    #[test]
+    fn test_mirror_position_applies_back_offset() {
+        let params = LayoutParams {
+            back_offset: (0.5, -0.3),
+            ..duplex_test_params()
+        };
+        let position = CardPosition { x: 5.0, y: 40.0 };
+        let mirrored = mirror_position_for_back(&position, &params);
+        assert!((mirrored.x - 75.5).abs() < 1e-5);
+        assert!((mirrored.y - 39.7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_mirror_is_involution_without_offset() {
+        // Mirroring twice must return the original position
+        let params = duplex_test_params();
+        let position = CardPosition { x: 27.0, y: 38.0 };
+        let twice =
+            mirror_position_for_back(&mirror_position_for_back(&position, &params), &params);
+        assert!((twice.x - position.x).abs() < 1e-5);
+        assert!((twice.y - position.y).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_duplex_interleaves_front_and_back_pages() {
+        let mut cards = vec![
+            Card::new(PathBuf::from("card1.jpg")),
+            Card::new(PathBuf::from("card2.jpg")),
+            Card::new(PathBuf::from("card3.jpg")),
+        ];
+        cards[2].set_copy_count(3); // 5 cards total
+
+        let grid = GridLayout {
+            rows: 2,
+            cols: 2,
+            cards_per_page: 4,
+            total_pages: 2,
+        };
+
+        let params = duplex_test_params();
+        let pages = distribute_cards(&cards, &grid, &params);
+
+        // 5 cards -> 2 front pages, each followed by a back page
+        assert_eq!(pages.len(), 4);
+        assert_eq!(pages[0].side, PageSide::Front);
+        assert_eq!(pages[1].side, PageSide::Back);
+        assert_eq!(pages[2].side, PageSide::Front);
+        assert_eq!(pages[3].side, PageSide::Back);
+        assert_eq!(
+            pages.iter().map(|p| p.page_number).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+
+        // Backs use the default back image and mirror their front positions
+        assert_eq!(pages[1].cards.len(), 4);
+        for ((front, front_pos), (back, back_pos)) in pages[0].cards.iter().zip(&pages[1].cards) {
+            assert_eq!(front.back_path, None);
+            assert_eq!(back.path, PathBuf::from("default_back.png"));
+            let expected = mirror_position_for_back(front_pos, &params);
+            assert_eq!(back_pos.x, expected.x);
+            assert_eq!(back_pos.y, expected.y);
+        }
+
+        // Partial last page: 1 front card -> 1 back card
+        assert_eq!(pages[2].cards.len(), 1);
+        assert_eq!(pages[3].cards.len(), 1);
+    }
+
+    #[test]
+    fn test_duplex_per_card_back_overrides_default() {
+        let mut cards = vec![
+            Card::new(PathBuf::from("card1.jpg")),
+            Card::new(PathBuf::from("card2.jpg")),
+        ];
+        cards[0].back_path = Some(PathBuf::from("special_back.png"));
+
+        let grid = GridLayout {
+            rows: 2,
+            cols: 2,
+            cards_per_page: 4,
+            total_pages: 1,
+        };
+
+        let params = duplex_test_params();
+        let pages = distribute_cards(&cards, &grid, &params);
+
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[1].cards[0].0.path, PathBuf::from("special_back.png"));
+        assert_eq!(pages[1].cards[1].0.path, PathBuf::from("default_back.png"));
+    }
+
+    #[test]
+    fn test_duplex_without_any_back_emits_empty_back_page() {
+        let cards = vec![Card::new(PathBuf::from("card1.jpg"))];
+
+        let grid = GridLayout {
+            rows: 1,
+            cols: 1,
+            cards_per_page: 1,
+            total_pages: 1,
+        };
+
+        let params = LayoutParams {
+            default_back_path: None,
+            ..duplex_test_params()
+        };
+        let pages = distribute_cards(&cards, &grid, &params);
+
+        // Back page still emitted (blank) so duplex pairing is preserved
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[1].side, PageSide::Back);
+        assert!(pages[1].cards.is_empty());
+    }
+
+    #[test]
+    fn test_duplex_uses_thumbnail_loaded_back_cards() {
+        let cards = vec![Card::new(PathBuf::from("card1.jpg"))];
+
+        let grid = GridLayout {
+            rows: 1,
+            cols: 1,
+            cards_per_page: 1,
+            total_pages: 1,
+        };
+
+        let params = duplex_test_params();
+        let mut back_card = Card::placeholder(PathBuf::from("default_back.png"));
+        back_card.set_thumbnail_failed("marker".to_string());
+        let mut back_cards = HashMap::new();
+        back_cards.insert(PathBuf::from("default_back.png"), back_card);
+
+        let pages = distribute_cards_with_backs(&cards, &grid, &params, &back_cards);
+
+        // The provided Card instance (not a fresh placeholder) is used
+        assert!(matches!(
+            pages[1].cards[0].0.thumbnail_state,
+            crate::types::ThumbnailState::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn test_non_duplex_pages_are_all_front() {
+        let cards = vec![Card::new(PathBuf::from("card1.jpg"))];
+        let grid = GridLayout {
+            rows: 1,
+            cols: 1,
+            cards_per_page: 1,
+            total_pages: 1,
+        };
+        let params = LayoutParams::default();
+        let pages = distribute_cards(&cards, &grid, &params);
+
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].side, PageSide::Front);
     }
 
     #[test]

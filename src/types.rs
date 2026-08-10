@@ -1,6 +1,7 @@
 use image::ImageBuffer;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use tcg_layout::color_adjust::HslAdjustment;
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -15,6 +16,23 @@ pub enum PageOrientation {
     #[default]
     Portrait,
     Landscape,
+}
+
+/// Which edge the sheet is flipped along when printing double-sided.
+/// Determines the mirror axis for back-page card positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum FlipEdge {
+    #[default]
+    LongEdge,
+    ShortEdge,
+}
+
+/// Whether a page holds card fronts or generated card backs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PageSide {
+    #[default]
+    Front,
+    Back,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -56,9 +74,29 @@ pub struct LayoutParams {
     pub orientation: FillOrder,            // RowMajor vs ColumnMajor
     pub page_orientation: PageOrientation, // Portrait vs Landscape
     pub target_dpi: u32,
-    pub bleed_mm: f32,       // Bleed amount in millimeters
-    pub enable_bleed: bool,  // Whether bleed is enabled
+    pub bleed_mm: f32,      // Bleed amount in millimeters
+    pub enable_bleed: bool, // Whether bleed is enabled
+    #[serde(default = "default_sharpen_amount")]
+    pub sharpen_amount: f32, // Unsharp mask strength
+    #[serde(default)]
+    pub enable_sharpen: bool, // Whether sharpening is enabled
     pub center_layout: bool, // Whether to center the layout on the page
+    #[serde(default)]
+    pub hsl_adjustments: Vec<HslAdjustment>, // Targeted color adjustments
+    #[serde(default)]
+    pub enable_color_adjust: bool, // Whether color adjustments are enabled
+    #[serde(default)]
+    pub enable_duplex: bool, // Whether double-sided (front/back) pages are generated
+    #[serde(default)]
+    pub flip_edge: FlipEdge, // Edge the sheet flips along when printed duplex
+    #[serde(default)]
+    pub back_offset: (f32, f32), // (x, y) mm shift applied to back pages for printer calibration
+    #[serde(default)]
+    pub default_back_path: Option<PathBuf>, // Back image used when a card has no specific back
+}
+
+fn default_sharpen_amount() -> f32 {
+    1.0
 }
 
 impl Default for LayoutParams {
@@ -71,14 +109,57 @@ impl Default for LayoutParams {
             orientation: FillOrder::RowMajor,
             page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
-            bleed_mm: 3.0,        // Standard print bleed
-            enable_bleed: false,  // Disabled by default
-            center_layout: false, // Disabled by default
+            bleed_mm: 3.0,         // Standard print bleed
+            enable_bleed: false,   // Disabled by default
+            sharpen_amount: 1.0,   // Moderate sharpening when enabled
+            enable_sharpen: false, // Disabled by default
+            center_layout: false,  // Disabled by default
+            hsl_adjustments: Vec::new(),
+            enable_color_adjust: false, // Disabled by default
+            enable_duplex: false,       // Disabled by default
+            flip_edge: FlipEdge::LongEdge,
+            back_offset: (0.0, 0.0),
+            default_back_path: None,
         }
     }
 }
 
 impl LayoutParams {
+    /// Page dimensions honoring the page orientation (width, height) in mm
+    pub fn effective_page_size(&self) -> (f32, f32) {
+        match self.page_orientation {
+            PageOrientation::Portrait => self.page_size,
+            PageOrientation::Landscape => (self.page_size.1, self.page_size.0),
+        }
+    }
+
+    /// Whether duplex back pages mirror horizontally (same row, opposite
+    /// column) rather than vertically (same column, opposite row).
+    ///
+    /// The flip happens about the physical sheet's edge, so the mirror axis
+    /// depends on both the flip edge and the page orientation: the sheet's
+    /// long edge is vertical on portrait pages (long-edge flip mirrors x)
+    /// but horizontal on landscape pages (long-edge flip mirrors y).
+    pub fn back_mirror_is_horizontal(&self) -> bool {
+        let (page_width, page_height) = self.effective_page_size();
+        let long_edge_is_vertical = page_height >= page_width;
+        match self.flip_edge {
+            FlipEdge::LongEdge => long_edge_is_vertical,
+            FlipEdge::ShortEdge => !long_edge_is_vertical,
+        }
+    }
+
+    /// Whether back-page images must print rotated 180° so cut cards come
+    /// out head-to-head (back upright when the card is flipped about its
+    /// vertical axis, like a commercially printed card).
+    ///
+    /// A duplex flip about a horizontal axis (vertical mirror) puts the back
+    /// image's top behind the front image's bottom; without this rotation the
+    /// cut card would be head-to-toe.
+    pub fn backs_rotated_180(&self) -> bool {
+        !self.back_mirror_is_horizontal()
+    }
+
     /// Calculate effective margins based on centering mode
     /// When centering is enabled, returns calculated centered margins
     /// When centering is disabled, returns user-specified margins
@@ -128,22 +209,30 @@ pub struct Card {
     pub original_dpi: Option<u32>,
     pub needs_scaling: bool,
     pub copy_count: u32,
+    pub back_path: Option<PathBuf>,
 }
 
 impl Card {
     pub fn new(path: PathBuf) -> Self {
-        let mut card = Self {
-            path: path.clone(),
-            thumbnail_state: ThumbnailState::NotLoaded,
-            original_dpi: None,
-            needs_scaling: false,
-            copy_count: 1,
-        };
+        let mut card = Self::placeholder(path);
 
         // Only load DPI info synchronously (it's fast)
         card.load_dpi_info();
 
         card
+    }
+
+    /// Create a card without touching the filesystem. Used for generated
+    /// back-side slots whose thumbnail-loaded instances live elsewhere.
+    pub fn placeholder(path: PathBuf) -> Self {
+        Self {
+            path,
+            thumbnail_state: ThumbnailState::NotLoaded,
+            original_dpi: None,
+            needs_scaling: false,
+            copy_count: 1,
+            back_path: None,
+        }
     }
 
     pub fn set_thumbnail_loading(&mut self) {
@@ -237,6 +326,7 @@ pub struct CardPosition {
 pub struct PageLayout {
     pub page_number: usize,
     pub cards: Vec<(Card, CardPosition)>,
+    pub side: PageSide,
 }
 
 #[derive(Debug, Clone)]
@@ -355,7 +445,12 @@ mod tests {
             target_dpi: 600,
             bleed_mm: 0.0,
             enable_bleed: false,
+            sharpen_amount: 1.0,
+            enable_sharpen: false,
             center_layout: false,
+            hsl_adjustments: Vec::new(),
+            enable_color_adjust: false,
+            ..Default::default()
         };
 
         assert_eq!(params.page_size, (100.0, 150.0));
@@ -436,6 +531,7 @@ mod tests {
         let page_layout = PageLayout {
             page_number: 1,
             cards: vec![(card.clone(), position)],
+            side: PageSide::Front,
         };
 
         assert_eq!(page_layout.page_number, 1);
@@ -526,6 +622,67 @@ mod tests {
         // Test decrement at minimum
         card.decrement_copy_count();
         assert_eq!(card.get_copy_count(), 1);
+    }
+
+    #[test]
+    fn test_flip_edge_default() {
+        assert_eq!(FlipEdge::default(), FlipEdge::LongEdge);
+    }
+
+    #[test]
+    fn test_page_side_default() {
+        assert_eq!(PageSide::default(), PageSide::Front);
+    }
+
+    #[test]
+    fn test_layout_params_duplex_defaults() {
+        let params = LayoutParams::default();
+        assert!(!params.enable_duplex);
+        assert_eq!(params.flip_edge, FlipEdge::LongEdge);
+        assert_eq!(params.back_offset, (0.0, 0.0));
+        assert_eq!(params.default_back_path, None);
+    }
+
+    #[test]
+    fn test_card_placeholder() {
+        let card = Card::placeholder(PathBuf::from("back.png"));
+        assert_eq!(card.path, PathBuf::from("back.png"));
+        assert!(matches!(card.thumbnail_state, ThumbnailState::NotLoaded));
+        assert_eq!(card.original_dpi, None);
+        assert_eq!(card.copy_count, 1);
+        assert_eq!(card.back_path, None);
+    }
+
+    #[test]
+    fn test_back_mirror_axis_by_flip_edge_and_orientation() {
+        let case = |page_orientation, flip_edge| LayoutParams {
+            page_orientation,
+            flip_edge,
+            ..Default::default()
+        };
+
+        // Portrait: sheet's long edge is vertical -> long-edge flip mirrors x
+        assert!(case(PageOrientation::Portrait, FlipEdge::LongEdge).back_mirror_is_horizontal());
+        assert!(!case(PageOrientation::Portrait, FlipEdge::ShortEdge).back_mirror_is_horizontal());
+
+        // Landscape: sheet's long edge is horizontal -> mirror axes swap
+        assert!(!case(PageOrientation::Landscape, FlipEdge::LongEdge).back_mirror_is_horizontal());
+        assert!(case(PageOrientation::Landscape, FlipEdge::ShortEdge).back_mirror_is_horizontal());
+
+        // Vertical mirror (horizontal-axis flip) requires a 180° back
+        // rotation to keep cut cards head-to-head; horizontal mirror doesn't
+        assert!(!case(PageOrientation::Portrait, FlipEdge::LongEdge).backs_rotated_180());
+        assert!(case(PageOrientation::Portrait, FlipEdge::ShortEdge).backs_rotated_180());
+        assert!(case(PageOrientation::Landscape, FlipEdge::LongEdge).backs_rotated_180());
+        assert!(!case(PageOrientation::Landscape, FlipEdge::ShortEdge).backs_rotated_180());
+    }
+
+    #[test]
+    fn test_effective_page_size() {
+        let mut params = LayoutParams::default();
+        assert_eq!(params.effective_page_size(), (210.0, 297.0));
+        params.page_orientation = PageOrientation::Landscape;
+        assert_eq!(params.effective_page_size(), (297.0, 210.0));
     }
 
     #[test]

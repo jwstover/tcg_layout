@@ -1,18 +1,22 @@
 use crate::types::Card;
 use eframe::egui;
 
-pub fn show_card_list_panel<F, I, C, R>(
+#[allow(clippy::too_many_arguments)]
+pub fn show_card_list_panel<F, I, C, R, B>(
     ui: &mut egui::Ui,
     cards: &[Card],
+    duplex_enabled: bool,
     mut remove_callback: F,
     mut import_callback: I,
     mut copy_count_callback: C,
     mut reorder_callback: R,
+    mut back_callback: B,
 ) where
     F: FnMut(usize),
     I: FnMut(),
     C: FnMut(usize, u32),
     R: FnMut(usize, bool), // index, is_move_up
+    B: FnMut(usize, bool), // index, is_set (false = clear)
 {
     ui.heading("Card List");
     ui.add_space(8.0);
@@ -53,6 +57,7 @@ pub fn show_card_list_panel<F, I, C, R>(
             .show(ui, |ui| {
                 let mut to_remove = None;
                 let mut copy_count_changes = Vec::new();
+                let mut back_changes = Vec::new();
 
                 for (index, card) in cards.iter().enumerate() {
                     ui.horizontal(|ui| {
@@ -110,6 +115,34 @@ pub fn show_card_list_panel<F, I, C, R>(
                                     copy_count_changes.push((index, new_count));
                                 }
                             });
+
+                            // Back image controls (only relevant for duplex)
+                            if duplex_enabled {
+                                ui.horizontal(|ui| {
+                                    ui.small("Back:");
+                                    match &card.back_path {
+                                        Some(back_path) => {
+                                            let name = back_path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_else(|| "?".to_string());
+                                            ui.small(name);
+                                            if ui.small_button("✕").clicked() {
+                                                back_changes.push((index, false));
+                                            }
+                                        }
+                                        None => {
+                                            ui.colored_label(
+                                                ui.visuals().weak_text_color(),
+                                                "default",
+                                            );
+                                        }
+                                    }
+                                    if ui.small_button("Set…").clicked() {
+                                        back_changes.push((index, true));
+                                    }
+                                });
+                            }
                         });
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -127,6 +160,11 @@ pub fn show_card_list_panel<F, I, C, R>(
                 // Handle copy count changes after iteration
                 for (index, new_count) in copy_count_changes {
                     copy_count_callback(index, new_count);
+                }
+
+                // Handle back image changes after iteration
+                for (index, is_set) in back_changes {
+                    back_callback(index, is_set);
                 }
 
                 // Handle removal after iteration
