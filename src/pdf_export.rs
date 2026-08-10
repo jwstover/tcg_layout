@@ -1,11 +1,11 @@
 use crate::layout::{calculate_cut_marks, calculate_grid};
-use crate::types::{LayoutParams, PageLayout, PageOrientation};
+use crate::types::{LayoutParams, PageLayout, PageOrientation, PageSide};
 use anyhow::{Context, Result};
 use printpdf::*;
 use printpdf::{ImageCompression, ImageOptimizationOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tcg_layout::bleed;
+use tcg_layout::{bleed, color_adjust, sharpen};
 
 pub struct PdfExporter {
     params: LayoutParams,
@@ -36,22 +36,36 @@ impl PdfExporter {
         let cut_marks = calculate_cut_marks(&self.params, &grid);
         let cut_mark_ops = self.build_cut_mark_ops(&cut_marks, page_height);
 
-        // Image deduplication: embed each unique file once, track pixel dims for sizing
-        let mut image_cache: HashMap<PathBuf, (XObjectId, f32, f32)> = HashMap::new();
+        // Image deduplication: embed each unique (file, rotation, side) once,
+        // track pixel dims for sizing. The side only enters the key when
+        // adjustments are side-scoped, so an image used on both sides is
+        // still embedded once whenever its pixels would be identical.
+        let side_scoped = self.side_scoped_color_adjust();
+        let mut image_cache: HashMap<(PathBuf, bool, bool), (XObjectId, f32, f32)> = HashMap::new();
 
         let mut pdf_pages = Vec::new();
 
         for (page_idx, page) in pages.iter().enumerate() {
             let mut ops = Vec::new();
 
-            // Draw cut marks first (background)
-            ops.extend(cut_mark_ops.clone());
+            // Draw cut marks first (background). Back pages get none: cards
+            // are cut from the front, and marks would need mirroring + the
+            // calibration offset to line up.
+            if page.side == PageSide::Front {
+                ops.extend(cut_mark_ops.clone());
+            }
+
+            let is_back = page.side == PageSide::Back;
+
+            // Back pages print rotated 180° when the duplex flip is about a
+            // horizontal axis, so cut cards come out head-to-head.
+            let rotate_180 = is_back && self.params.backs_rotated_180();
 
             // Draw card images
             for (card, position) in &page.cards {
                 let (image_bytes, card_w_mm, card_h_mm, img_x_mm, img_y_mm) =
-                    if self.params.enable_bleed && self.params.bleed_mm > 0.0 {
-                        self.prepare_bleed_image(card, position)?
+                    if self.needs_image_processing_for(is_back) || rotate_180 {
+                        self.prepare_processed_image(card, position, rotate_180, is_back)?
                     } else {
                         let bytes = std::fs::read(&card.path).with_context(|| {
                             format!("Failed to read image: {}", card.path.display())
@@ -66,8 +80,9 @@ impl PdfExporter {
                     };
 
                 // Get or create the XObject ID for this image
+                let cache_key = (card.path.clone(), rotate_180, is_back && side_scoped);
                 let (xobject_id, img_pixel_width, img_pixel_height) = if let Some((id, pw, ph)) =
-                    image_cache.get(&card.path)
+                    image_cache.get(&cache_key)
                 {
                     (id.clone(), *pw, *ph)
                 } else {
@@ -78,7 +93,7 @@ impl PdfExporter {
                     let pw = raw_image.width as f32;
                     let ph = raw_image.height as f32;
                     let id = doc.add_image(&raw_image);
-                    image_cache.insert(card.path.clone(), (id.clone(), pw, ph));
+                    image_cache.insert(cache_key, (id.clone(), pw, ph));
                     (id, pw, ph)
                 };
 
@@ -175,37 +190,106 @@ impl PdfExporter {
         ops
     }
 
-    fn prepare_bleed_image(
+    fn bleed_active(&self) -> bool {
+        self.params.enable_bleed && self.params.bleed_mm > 0.0
+    }
+
+    fn sharpen_active(&self) -> bool {
+        self.params.enable_sharpen && self.params.sharpen_amount > 0.0
+    }
+
+    fn color_adjust_active_for(&self, is_back: bool) -> bool {
+        self.params.enable_color_adjust
+            && self
+                .params
+                .hsl_adjustments
+                .iter()
+                .any(|a| a.is_active_for(is_back))
+    }
+
+    /// Whether processed pixels differ between fronts and backs: some active
+    /// adjustment is scoped to a single side. When true, the image dedup
+    /// cache must not share entries across sides.
+    fn side_scoped_color_adjust(&self) -> bool {
+        self.params.enable_color_adjust
+            && self
+                .params
+                .hsl_adjustments
+                .iter()
+                .any(|a| a.is_active() && a.scope != color_adjust::AdjustmentScope::All)
+    }
+
+    fn needs_image_processing_for(&self, is_back: bool) -> bool {
+        self.bleed_active() || self.sharpen_active() || self.color_adjust_active_for(is_back)
+    }
+
+    /// Load an image and apply color adjustments, sharpening, and/or bleed,
+    /// returning PNG bytes plus placement dimensions/position in mm. Color
+    /// adjustments run first (on the original colors), then sharpening, so
+    /// bleed strips derive from the fully processed image. `rotate_180`
+    /// rotates the final image in place (for duplex back pages). `is_back`
+    /// selects which scoped color adjustments apply.
+    fn prepare_processed_image(
         &self,
         card: &crate::types::Card,
         position: &crate::types::CardPosition,
+        rotate_180: bool,
+        is_back: bool,
     ) -> Result<(Vec<u8>, f32, f32, f32, f32)> {
-        let metadata = tcg_layout::image::load_image_metadata(&card.path)?;
+        let mut img = ::image::open(&card.path)
+            .with_context(|| format!("Failed to open image: {}", card.path.display()))?;
 
-        let (bleed_pixels_x, bleed_pixels_y) = bleed::calculate_bleed_pixels_from_dimensions(
-            self.params.bleed_mm,
-            self.params.card_size,
-            metadata.dimensions,
-        );
+        if self.color_adjust_active_for(is_back) {
+            let adjustments =
+                color_adjust::adjustments_for_side(&self.params.hsl_adjustments, is_back);
+            img = color_adjust::apply_hsl_adjustments_to_image(&img, &adjustments);
+        }
 
-        let bleed_pixels = ((bleed_pixels_x + bleed_pixels_y) / 2).max(1);
-        let bleed_img = bleed::apply_bleed(&card.path, bleed_pixels)?;
+        if self.sharpen_active() {
+            img = sharpen::apply_sharpen(&img, self.params.sharpen_amount);
+        }
+
+        let (card_width, card_height, offset_x, offset_y) = if self.bleed_active() {
+            let (bleed_pixels_x, bleed_pixels_y) = bleed::calculate_bleed_pixels_from_dimensions(
+                self.params.bleed_mm,
+                self.params.card_size,
+                (img.width(), img.height()),
+            );
+
+            let bleed_pixels = ((bleed_pixels_x + bleed_pixels_y) / 2).max(1);
+            img =
+                ::image::DynamicImage::ImageRgba8(bleed::apply_bleed_to_image(&img, bleed_pixels));
+
+            (
+                self.params.card_size.0 + 2.0 * self.params.bleed_mm,
+                self.params.card_size.1 + 2.0 * self.params.bleed_mm,
+                position.x - self.params.bleed_mm,
+                position.y - self.params.bleed_mm,
+            )
+        } else {
+            (
+                self.params.card_size.0,
+                self.params.card_size.1,
+                position.x,
+                position.y,
+            )
+        };
+
+        // Rotate last so the fully processed image (including bleed) turns
+        // as one piece; the placement rectangle is unchanged
+        if rotate_180 {
+            img = img.rotate180();
+        }
 
         // Encode to PNG in memory
         let mut png_bytes = std::io::Cursor::new(Vec::new());
-        bleed_img
-            .write_to(&mut png_bytes, ::image::ImageFormat::Png)
-            .context("Failed to encode bleed image to PNG")?;
-
-        let bleed_width = self.params.card_size.0 + 2.0 * self.params.bleed_mm;
-        let bleed_height = self.params.card_size.1 + 2.0 * self.params.bleed_mm;
-        let offset_x = position.x - self.params.bleed_mm;
-        let offset_y = position.y - self.params.bleed_mm;
+        img.write_to(&mut png_bytes, ::image::ImageFormat::Png)
+            .context("Failed to encode processed image to PNG")?;
 
         Ok((
             png_bytes.into_inner(),
-            bleed_width,
-            bleed_height,
+            card_width,
+            card_height,
             offset_x,
             offset_y,
         ))
@@ -236,7 +320,7 @@ pub fn export_pages_to_pdf_with_progress<F: Fn(usize, usize)>(
 mod tests {
     use super::*;
     use crate::types::{
-        Card, CardPosition, FillOrder, LayoutParams, Margins, PageLayout, PageOrientation,
+        Card, CardPosition, FillOrder, FlipEdge, LayoutParams, Margins, PageLayout, PageOrientation,
     };
     use tempfile::TempDir;
 
@@ -251,7 +335,12 @@ mod tests {
             target_dpi: 300,
             bleed_mm: 0.0,
             enable_bleed: false,
+            sharpen_amount: 1.0,
+            enable_sharpen: false,
             center_layout: false,
+            hsl_adjustments: Vec::new(),
+            enable_color_adjust: false,
+            ..Default::default()
         }
     }
 
@@ -325,6 +414,7 @@ mod tests {
         let pages = vec![PageLayout {
             page_number: 1,
             cards: vec![(Card::new(img_path), CardPosition { x: 5.0, y: 5.0 })],
+            side: PageSide::Front,
         }];
 
         let output_path = temp_dir.path().join("output.pdf");
@@ -335,6 +425,147 @@ mod tests {
         // Verify file is non-empty and starts with PDF header
         let bytes = std::fs::read(&output_path).unwrap();
         assert!(bytes.len() > 100);
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_export_with_sharpening() {
+        let temp_dir = TempDir::new().unwrap();
+        let img_path = temp_dir.path().join("test_card.png");
+
+        let img = ::image::ImageBuffer::from_fn(100, 140, |x, _| {
+            if x < 50 {
+                ::image::Rgba([50u8, 50, 50, 255])
+            } else {
+                ::image::Rgba([200u8, 200, 200, 255])
+            }
+        });
+        img.save(&img_path).unwrap();
+
+        let params = LayoutParams {
+            sharpen_amount: 1.5,
+            enable_sharpen: true,
+            ..create_test_params()
+        };
+        let pages = vec![PageLayout {
+            page_number: 1,
+            cards: vec![(Card::new(img_path), CardPosition { x: 5.0, y: 5.0 })],
+            side: PageSide::Front,
+        }];
+
+        let output_path = temp_dir.path().join("sharpened.pdf");
+        let result = export_pages_to_pdf(&pages, &params, &output_path);
+        assert!(result.is_ok(), "Export failed: {:?}", result.err());
+
+        let bytes = std::fs::read(&output_path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_export_with_sharpening_and_bleed() {
+        let temp_dir = TempDir::new().unwrap();
+        let img_path = temp_dir.path().join("test_card.png");
+
+        let img = ::image::ImageBuffer::from_fn(100, 140, |_, _| ::image::Rgba([255u8, 0, 0, 255]));
+        img.save(&img_path).unwrap();
+
+        let params = LayoutParams {
+            bleed_mm: 2.0,
+            enable_bleed: true,
+            sharpen_amount: 1.0,
+            enable_sharpen: true,
+            ..create_test_params()
+        };
+        let pages = vec![PageLayout {
+            page_number: 1,
+            cards: vec![(Card::new(img_path), CardPosition { x: 5.0, y: 5.0 })],
+            side: PageSide::Front,
+        }];
+
+        let output_path = temp_dir.path().join("both.pdf");
+        let result = export_pages_to_pdf(&pages, &params, &output_path);
+        assert!(result.is_ok(), "Export failed: {:?}", result.err());
+
+        let bytes = std::fs::read(&output_path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_export_with_color_adjustments() {
+        let temp_dir = TempDir::new().unwrap();
+        let img_path = temp_dir.path().join("test_card.png");
+
+        let img =
+            ::image::ImageBuffer::from_fn(100, 140, |_, _| ::image::Rgba([220u8, 200, 40, 255]));
+        img.save(&img_path).unwrap();
+
+        let params = LayoutParams {
+            enable_color_adjust: true,
+            hsl_adjustments: vec![color_adjust::HslAdjustment {
+                target_hue: 55.0,
+                hue_range: 20.0,
+                feather: 10.0,
+                hue_shift: 30.0,
+                saturation_shift: -0.2,
+                lightness_shift: 0.0,
+                ..Default::default()
+            }],
+            ..create_test_params()
+        };
+        let pages = vec![PageLayout {
+            page_number: 1,
+            cards: vec![(Card::new(img_path), CardPosition { x: 5.0, y: 5.0 })],
+            side: PageSide::Front,
+        }];
+
+        let output_path = temp_dir.path().join("color_adjusted.pdf");
+        let result = export_pages_to_pdf(&pages, &params, &output_path);
+        assert!(result.is_ok(), "Export failed: {:?}", result.err());
+
+        let bytes = std::fs::read(&output_path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_export_duplex_with_backs_only_color_adjustment() {
+        let temp_dir = TempDir::new().unwrap();
+        let front_path = temp_dir.path().join("front.png");
+        let back_path = temp_dir.path().join("back.png");
+
+        let front =
+            ::image::ImageBuffer::from_fn(100, 140, |_, _| ::image::Rgba([220u8, 200, 40, 255]));
+        front.save(&front_path).unwrap();
+        let back =
+            ::image::ImageBuffer::from_fn(100, 140, |_, _| ::image::Rgba([220u8, 40, 60, 255]));
+        back.save(&back_path).unwrap();
+
+        let params = LayoutParams {
+            enable_duplex: true,
+            default_back_path: Some(back_path),
+            enable_color_adjust: true,
+            hsl_adjustments: vec![color_adjust::HslAdjustment {
+                target_hue: 0.0,
+                hue_range: 25.0,
+                feather: 10.0,
+                hue_shift: 30.0,
+                saturation_shift: 0.0,
+                lightness_shift: 0.0,
+                scope: color_adjust::AdjustmentScope::BacksOnly,
+                ..Default::default()
+            }],
+            ..create_test_params()
+        };
+
+        let grid = crate::layout::calculate_grid(&params);
+        let pages = crate::layout::distribute_cards(&[Card::new(front_path)], &grid, &params);
+        assert_eq!(pages[0].side, PageSide::Front);
+        assert_eq!(pages[1].side, PageSide::Back);
+
+        let output_path = temp_dir.path().join("backs_only.pdf");
+        let result = export_pages_to_pdf(&pages, &params, &output_path);
+        assert!(result.is_ok(), "Export failed: {:?}", result.err());
+
+        let bytes = std::fs::read(&output_path).unwrap();
         assert!(bytes.starts_with(b"%PDF"));
     }
 
@@ -358,10 +589,12 @@ mod tests {
                         CardPosition { x: 27.0, y: 5.0 },
                     ),
                 ],
+                side: PageSide::Front,
             },
             PageLayout {
                 page_number: 2,
                 cards: vec![(Card::new(img_path), CardPosition { x: 5.0, y: 5.0 })],
+                side: PageSide::Front,
             },
         ];
 
@@ -372,6 +605,61 @@ mod tests {
 
         let bytes = std::fs::read(&output_path).unwrap();
         assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn test_export_duplex_pages_end_to_end() {
+        let temp_dir = TempDir::new().unwrap();
+        let front_path = temp_dir.path().join("front.png");
+        let back_path = temp_dir.path().join("back.png");
+
+        let front =
+            ::image::ImageBuffer::from_fn(100, 140, |_, _| ::image::Rgba([255u8, 0, 0, 255]));
+        front.save(&front_path).unwrap();
+        let back =
+            ::image::ImageBuffer::from_fn(100, 140, |_, _| ::image::Rgba([0u8, 0, 255, 255]));
+        back.save(&back_path).unwrap();
+
+        let params = LayoutParams {
+            enable_duplex: true,
+            default_back_path: Some(back_path),
+            back_offset: (0.3, -0.2),
+            ..create_test_params()
+        };
+
+        let grid = crate::layout::calculate_grid(&params);
+        let mut card = Card::new(front_path);
+        card.set_copy_count(3);
+        let pages = crate::layout::distribute_cards(&[card], &grid, &params);
+
+        // Fronts and backs interleave
+        assert!(pages.len() >= 2);
+        assert_eq!(pages[0].side, PageSide::Front);
+        assert_eq!(pages[1].side, PageSide::Back);
+
+        let output_path = temp_dir.path().join("duplex.pdf");
+        let result = export_pages_to_pdf(&pages, &params, &output_path);
+        assert!(result.is_ok(), "Export failed: {:?}", result.err());
+
+        let bytes = std::fs::read(&output_path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+
+        // Short-edge flip on a portrait page mirrors vertically, which
+        // triggers the 180° back-rotation path (image decode + rotate)
+        let rotated_params = LayoutParams {
+            flip_edge: FlipEdge::ShortEdge,
+            ..params.clone()
+        };
+        assert!(rotated_params.backs_rotated_180());
+        let pages = crate::layout::distribute_cards(
+            &[Card::new(temp_dir.path().join("front.png"))],
+            &grid,
+            &rotated_params,
+        );
+        let rotated_path = temp_dir.path().join("duplex_rotated.pdf");
+        let result = export_pages_to_pdf(&pages, &rotated_params, &rotated_path);
+        assert!(result.is_ok(), "Export failed: {:?}", result.err());
+        assert!(std::fs::read(&rotated_path).unwrap().starts_with(b"%PDF"));
     }
 
     #[test]
@@ -389,10 +677,12 @@ mod tests {
             PageLayout {
                 page_number: 1,
                 cards: vec![(Card::new(img_path.clone()), CardPosition { x: 5.0, y: 5.0 })],
+                side: PageSide::Front,
             },
             PageLayout {
                 page_number: 2,
                 cards: vec![(Card::new(img_path), CardPosition { x: 5.0, y: 5.0 })],
+                side: PageSide::Back,
             },
         ];
 

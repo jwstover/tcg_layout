@@ -1,7 +1,8 @@
 use super::{CardSizeOption, PageSizeOption};
-use crate::types::{FillOrder, LayoutParams, PageOrientation};
+use crate::types::{FillOrder, FlipEdge, LayoutParams, PageOrientation};
 use eframe::egui;
 
+#[allow(clippy::too_many_arguments)]
 pub fn show_parameters_panel(
     ui: &mut egui::Ui,
     layout_params: &mut LayoutParams,
@@ -10,6 +11,10 @@ pub fn show_parameters_panel(
     success_message_timer: &mut f32,
     page_size_option: &mut PageSizeOption,
     card_size_option: &mut CardSizeOption,
+    has_cards: bool,
+    sharpen_preview_requested: &mut bool,
+    color_adjust_preview_requested: &mut bool,
+    default_back_pick_requested: &mut bool,
 ) -> bool {
     // Store original values to detect changes
     let original_layout_params = layout_params.clone();
@@ -250,6 +255,174 @@ pub fn show_parameters_panel(
                     .suffix(" mm"));
                 ui.end_row();
             }
+
+            // Sharpening section
+            ui.horizontal(|ui| {
+                ui.label("Sharpening:");
+                ui.colored_label(ui.visuals().weak_text_color(), "(?)").on_hover_text(
+                    "Applies an unsharp mask to all card images.\n\
+                     Useful for slightly soft scans or upscaled images.\n\
+                     Use the full-resolution preview to judge the effect before exporting."
+                );
+            });
+            ui.checkbox(&mut layout_params.enable_sharpen, "Enable sharpening");
+            ui.end_row();
+
+            // Only show sharpen controls if enabled
+            if layout_params.enable_sharpen {
+                ui.label("Sharpen Amount:");
+                ui.add(egui::DragValue::new(&mut layout_params.sharpen_amount)
+                    .speed(0.05)
+                    .range(0.0..=tcg_layout::sharpen::MAX_SHARPEN_AMOUNT));
+                ui.end_row();
+
+                ui.label("");
+                if ui
+                    .add_enabled(has_cards, egui::Button::new("Preview Full Resolution..."))
+                    .on_disabled_hover_text("Import cards to preview sharpening")
+                    .clicked()
+                {
+                    *sharpen_preview_requested = true;
+                }
+                ui.end_row();
+            }
+
+            // Color adjustment section
+            ui.horizontal(|ui| {
+                ui.label("Color Adjust:");
+                ui.colored_label(ui.visuals().weak_text_color(), "(?)").on_hover_text(
+                    "Targeted HSL adjustments: shift the hue, saturation, or\n\
+                     lightness of specific colors (e.g. certain yellows). Each\n\
+                     adjustment can apply to all cards, only fronts, or only backs.\n\
+                     Not shown in the page preview — use the editor window to\n\
+                     judge the effect. Applied during export."
+                );
+            });
+            ui.checkbox(&mut layout_params.enable_color_adjust, "Enable color adjustments");
+            ui.end_row();
+
+            if layout_params.enable_color_adjust {
+                ui.label("Adjustments:");
+                ui.horizontal(|ui| {
+                    let enabled = layout_params
+                        .hsl_adjustments
+                        .iter()
+                        .filter(|a| a.enabled)
+                        .count();
+                    ui.label(format!(
+                        "{enabled} of {} enabled",
+                        layout_params.hsl_adjustments.len()
+                    ));
+                    ui.colored_label(ui.visuals().weak_text_color(), "(not shown in preview)");
+                });
+                ui.end_row();
+
+                ui.label("");
+                if ui
+                    .add_enabled(has_cards, egui::Button::new("Edit / Preview..."))
+                    .on_disabled_hover_text("Import cards to edit color adjustments")
+                    .clicked()
+                {
+                    *color_adjust_preview_requested = true;
+                }
+                ui.end_row();
+            }
+
+            // Double-sided printing section
+            ui.horizontal(|ui| {
+                ui.label("Double-sided:");
+                ui.colored_label(ui.visuals().weak_text_color(), "(?)").on_hover_text(
+                    "Generates a back page after every front page so consecutive\n\
+                     pages print front-to-back with duplex printing. Back positions\n\
+                     are mirrored for the flip edge; use the back offset to correct\n\
+                     printer front/back misalignment."
+                );
+            });
+            ui.checkbox(&mut layout_params.enable_duplex, "Enable double-sided");
+            ui.end_row();
+
+            if layout_params.enable_duplex {
+                ui.horizontal(|ui| {
+                    ui.label("Flip Edge:");
+                    ui.colored_label(ui.visuals().weak_text_color(), "(?)").on_hover_text(
+                        "Match this to the binding setting in your print dialog\n\
+                         (Long-Edge or Short-Edge binding). The flip is about the\n\
+                         physical sheet's edge, so the mirror direction depends on\n\
+                         page orientation: on portrait pages a long-edge flip mirrors\n\
+                         backs left-right; on landscape pages it mirrors them\n\
+                         top-bottom (the sheet's long edge is the top/bottom of a\n\
+                         landscape layout)."
+                    );
+                });
+                egui::ComboBox::from_id_salt("flip_edge_combo")
+                    .selected_text(match layout_params.flip_edge {
+                        FlipEdge::LongEdge => "Long edge",
+                        FlipEdge::ShortEdge => "Short edge",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut layout_params.flip_edge, FlipEdge::LongEdge, "Long edge");
+                        ui.selectable_value(&mut layout_params.flip_edge, FlipEdge::ShortEdge, "Short edge");
+                    });
+                ui.end_row();
+
+                ui.label("");
+                ui.colored_label(
+                    ui.visuals().weak_text_color(),
+                    if layout_params.back_mirror_is_horizontal() {
+                        "Backs mirror left-right (same row, opposite column)"
+                    } else {
+                        "Backs mirror top-bottom and print rotated 180°\n(cut cards stay head-to-head)"
+                    },
+                );
+                ui.end_row();
+
+                ui.horizontal(|ui| {
+                    ui.label("Back Offset:");
+                    ui.colored_label(ui.visuals().weak_text_color(), "(?)").on_hover_text(
+                        "Shifts back-page content to compensate for printer duplex\n\
+                         misregistration. Positive X moves backs toward the sheet's\n\
+                         right edge (as printed on the back side); positive Y moves\n\
+                         them down. Print a test sheet, hold it up to the light, and\n\
+                         adjust in 0.1 mm steps until fronts and backs align."
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("X:");
+                    ui.add(egui::DragValue::new(&mut layout_params.back_offset.0)
+                        .speed(0.05)
+                        .range(-10.0..=10.0)
+                        .suffix(" mm"));
+                    ui.label("Y:");
+                    ui.add(egui::DragValue::new(&mut layout_params.back_offset.1)
+                        .speed(0.05)
+                        .range(-10.0..=10.0)
+                        .suffix(" mm"));
+                });
+                ui.end_row();
+
+                ui.label("Default Back:");
+                ui.horizontal(|ui| {
+                    match &layout_params.default_back_path {
+                        Some(path) => {
+                            let name = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "?".to_string());
+                            ui.colored_label(ui.visuals().text_color(), name);
+                            if ui.small_button("✕").clicked() {
+                                layout_params.default_back_path = None;
+                            }
+                        }
+                        None => {
+                            ui.colored_label(ui.visuals().weak_text_color(), "None");
+                        }
+                    }
+                    if ui.small_button("Choose…").clicked() {
+                        *default_back_pick_requested = true;
+                    }
+                });
+                ui.end_row();
+            }
         });
 
     ui.add_space(8.0);
@@ -333,6 +506,56 @@ fn validate_params(
 
     if layout_params.enable_bleed && layout_params.bleed_mm > 10.0 {
         validation_errors.push("Bleed amount exceeds maximum (10mm)".to_string());
+    }
+
+    if layout_params.enable_sharpen && layout_params.sharpen_amount < 0.0 {
+        validation_errors.push("Sharpen amount cannot be negative".to_string());
+    }
+
+    if layout_params.enable_sharpen
+        && layout_params.sharpen_amount > tcg_layout::sharpen::MAX_SHARPEN_AMOUNT
+    {
+        validation_errors.push(format!(
+            "Sharpen amount exceeds maximum ({})",
+            tcg_layout::sharpen::MAX_SHARPEN_AMOUNT
+        ));
+    }
+
+    if layout_params.enable_duplex
+        && (layout_params.back_offset.0.abs() > 10.0 || layout_params.back_offset.1.abs() > 10.0)
+    {
+        validation_errors.push("Back offset exceeds maximum (±10mm)".to_string());
+    }
+
+    if layout_params.enable_color_adjust {
+        for (i, adj) in layout_params.hsl_adjustments.iter().enumerate() {
+            if !(0.0..=360.0).contains(&adj.target_hue) {
+                validation_errors.push(format!(
+                    "Color adjustment {}: target hue must be 0-360°",
+                    i + 1
+                ));
+            }
+            if adj.hue_range <= 0.0 || adj.hue_range > tcg_layout::color_adjust::MAX_HUE_RANGE {
+                validation_errors.push(format!(
+                    "Color adjustment {}: hue range must be within 0-{}°",
+                    i + 1,
+                    tcg_layout::color_adjust::MAX_HUE_RANGE
+                ));
+            }
+            if adj.hue_shift.abs() > tcg_layout::color_adjust::MAX_HUE_SHIFT {
+                validation_errors.push(format!(
+                    "Color adjustment {}: hue shift must be within ±{}°",
+                    i + 1,
+                    tcg_layout::color_adjust::MAX_HUE_SHIFT
+                ));
+            }
+            if adj.saturation_shift.abs() > 1.0 || adj.lightness_shift.abs() > 1.0 {
+                validation_errors.push(format!(
+                    "Color adjustment {}: saturation and lightness shifts must be within ±1.0",
+                    i + 1
+                ));
+            }
+        }
     }
 
     // Calculate effective margins for validation

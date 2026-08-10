@@ -1,8 +1,10 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
 pub mod decklist;
+pub mod google_drive;
 pub mod image_processing;
 pub mod layout;
+pub mod marvelcdb;
 pub mod pdf_export;
 pub mod settings;
 pub mod style;
@@ -12,18 +14,27 @@ pub mod types;
 pub mod ui;
 
 use crate::decklist::{DecklistEntry, DecklistManager, MatchedCard};
+use crate::google_drive::GoogleDriveMessage;
+use crate::image_processing::ThumbnailParams;
+use crate::marvelcdb::MarvelCdbMessage;
 use crate::pdf_export::export_pages_to_pdf_with_progress;
 use crate::settings::{AppSettings, SettingsManager};
 use crate::svg_export::export_pages_to_single_svg_with_progress;
 use eframe::egui;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use thumbnail_manager::{ThumbnailManager, ThumbnailMessage};
 use tokio::task::JoinHandle;
 use types::{Card, LayoutParams};
+use ui::color_adjust_preview::{ColorAdjustPreviewAction, ColorAdjustPreviewState};
 use ui::decklist_panel::DecklistState;
 use ui::preview_panel::PreviewState;
-use ui::{card_list_panel, decklist_panel, parameters_panel, preview_panel};
+use ui::sharpen_preview::{SharpenPreviewAction, SharpenPreviewState};
+use ui::{
+    card_list_panel, color_adjust_preview, decklist_panel, parameters_panel, preview_panel,
+    sharpen_preview,
+};
 use ui::{CardSizeOption, PageSizeOption};
 
 #[tokio::main]
@@ -32,6 +43,18 @@ async fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
+        // When launched as a bare binary (e.g. `cargo run`) rather than a `.app`
+        // bundle, macOS defaults to an accessory activation policy: the app is
+        // hidden from CMD+Tab and can't reliably become the frontmost window,
+        // which drops keyboard focus. Force the Regular policy so it behaves
+        // like a normal foreground app.
+        event_loop_builder: Some(Box::new(|_builder| {
+            #[cfg(target_os = "macos")]
+            {
+                use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+                _builder.with_activation_policy(ActivationPolicy::Regular);
+            }
+        })),
         ..Default::default()
     };
 
@@ -101,6 +124,7 @@ struct TcgLayoutApp {
     page_size_option: PageSizeOption,
     card_size_option: CardSizeOption,
     selected_cards: Vec<Card>,
+    back_cards: HashMap<PathBuf, Card>,
     preview_state: PreviewState,
     thumbnail_manager: ThumbnailManager,
     decklist_state: DecklistState,
@@ -111,9 +135,17 @@ struct TcgLayoutApp {
     export_state: ExportState,
     export_receiver: Option<mpsc::Receiver<ExportMessage>>,
     export_task: Option<JoinHandle<()>>,
+    marvelcdb_receiver: Option<mpsc::Receiver<MarvelCdbMessage>>,
+    marvelcdb_task: Option<JoinHandle<()>>,
+    drive_index_receiver: Option<mpsc::Receiver<GoogleDriveMessage>>,
+    drive_index_task: Option<JoinHandle<()>>,
     settings_manager: SettingsManager,
     previous_bleed_enabled: bool,
     previous_bleed_mm: f32,
+    previous_sharpen_enabled: bool,
+    previous_sharpen_amount: f32,
+    sharpen_preview_state: SharpenPreviewState,
+    color_adjust_preview_state: ColorAdjustPreviewState,
 }
 
 impl Default for TcgLayoutApp {
@@ -127,10 +159,26 @@ impl Default for TcgLayoutApp {
         // Load saved settings
         let saved_settings = settings_manager.load_settings();
 
-        // Load API key from keyring and initialize decklist state
+        // Load API keys from keyring and initialize decklist state
         let api_key = settings_manager.load_openai_api_key().unwrap_or_default();
+        let google_drive_api_key = settings_manager
+            .load_google_drive_api_key()
+            .unwrap_or_default();
+        let marvel_dir = saved_settings
+            .marvel_champions_dir
+            .clone()
+            .unwrap_or_else(settings::default_marvel_champions_dir);
+        let google_drive_folder_url = saved_settings
+            .google_drive_folder_id
+            .clone()
+            .unwrap_or_default();
+        let drive_index_updated_at = google_drive::load_drive_index_timestamp();
         let decklist_state = DecklistState {
             api_key,
+            marvel_champions_dir: marvel_dir,
+            google_drive_api_key,
+            google_drive_folder_url,
+            drive_index_updated_at,
             ..Default::default()
         };
 
@@ -142,6 +190,7 @@ impl Default for TcgLayoutApp {
             page_size_option: saved_settings.page_size_option,
             card_size_option: saved_settings.card_size_option,
             selected_cards: Vec::new(),
+            back_cards: HashMap::new(),
             preview_state: PreviewState::default(),
             thumbnail_manager: ThumbnailManager::with_capacity(200), // Larger cache for better performance
             decklist_state,
@@ -152,19 +201,40 @@ impl Default for TcgLayoutApp {
             export_state: ExportState::default(),
             export_receiver: None,
             export_task: None,
+            marvelcdb_receiver: None,
+            marvelcdb_task: None,
+            drive_index_receiver: None,
+            drive_index_task: None,
             settings_manager,
             previous_bleed_enabled: saved_settings.layout_params.enable_bleed,
             previous_bleed_mm: saved_settings.layout_params.bleed_mm,
+            previous_sharpen_enabled: saved_settings.layout_params.enable_sharpen,
+            previous_sharpen_amount: saved_settings.layout_params.sharpen_amount,
+            sharpen_preview_state: SharpenPreviewState::default(),
+            color_adjust_preview_state: ColorAdjustPreviewState::default(),
         }
     }
 }
 
 impl TcgLayoutApp {
     fn save_settings(&self) {
+        let google_drive_folder_id = if self
+            .decklist_state
+            .google_drive_folder_url
+            .trim()
+            .is_empty()
+        {
+            None
+        } else {
+            Some(self.decklist_state.google_drive_folder_url.clone())
+        };
+
         let settings = AppSettings {
             layout_params: self.layout_params.clone(),
             page_size_option: self.page_size_option,
             card_size_option: self.card_size_option,
+            marvel_champions_dir: Some(self.decklist_state.marvel_champions_dir.clone()),
+            google_drive_folder_id,
         };
 
         if let Err(e) = self.settings_manager.save_settings(&settings) {
@@ -181,6 +251,15 @@ impl TcgLayoutApp {
         }
     }
 
+    fn save_google_drive_api_key(&self) {
+        if let Err(e) = self
+            .settings_manager
+            .save_google_drive_api_key(&self.decklist_state.google_drive_api_key)
+        {
+            log::error!("Failed to save Google Drive API key: {e}");
+        }
+    }
+
     fn import_images(&mut self) {
         let files = rfd::FileDialog::new()
             .add_filter("Images", &["jpg", "jpeg", "png", "tiff", "tif"])
@@ -188,16 +267,15 @@ impl TcgLayoutApp {
             .pick_files();
 
         if let Some(paths) = files {
+            let thumbnail_params = ThumbnailParams::from_layout(&self.layout_params);
             for path in paths {
                 let mut card = Card::new(path.clone());
 
                 // Check if thumbnail is already cached
-                if let Some(thumbnail) = self.thumbnail_manager.request_thumbnail(
-                    path.clone(),
-                    self.layout_params.bleed_mm,
-                    self.layout_params.enable_bleed,
-                    self.layout_params.card_size,
-                ) {
+                if let Some(thumbnail) = self
+                    .thumbnail_manager
+                    .request_thumbnail(path.clone(), &thumbnail_params)
+                {
                     // Cache hit - set thumbnail immediately
                     card.set_thumbnail_loaded(thumbnail);
                 } else {
@@ -216,8 +294,14 @@ impl TcgLayoutApp {
         while let Some(message) = self.thumbnail_manager.try_recv_message() {
             match message {
                 ThumbnailMessage::ThumbnailLoaded { path, result, .. } => {
-                    // Find the card with this path and update its thumbnail
-                    if let Some(card) = self.selected_cards.iter_mut().find(|c| c.path == path) {
+                    // Find the card with this path (front or back) and update
+                    // its thumbnail
+                    let card = self
+                        .selected_cards
+                        .iter_mut()
+                        .find(|c| c.path == path)
+                        .or_else(|| self.back_cards.get_mut(&path));
+                    if let Some(card) = card {
                         match result {
                             thumbnail_manager::ThumbnailResult::Success(thumbnail) => {
                                 card.set_thumbnail_loaded(thumbnail);
@@ -232,19 +316,115 @@ impl TcgLayoutApp {
         }
     }
 
+    /// Make sure every referenced back image (per-card or default) has a
+    /// thumbnail-managed Card instance in `back_cards`. Covers paths restored
+    /// from settings as well as freshly assigned ones.
+    fn ensure_back_cards_registered(&mut self) {
+        let mut missing: Vec<PathBuf> = Vec::new();
+
+        if let Some(path) = &self.layout_params.default_back_path {
+            if !self.back_cards.contains_key(path) {
+                missing.push(path.clone());
+            }
+        }
+        for card in &self.selected_cards {
+            if let Some(path) = &card.back_path {
+                if !self.back_cards.contains_key(path) {
+                    missing.push(path.clone());
+                }
+            }
+        }
+
+        let thumbnail_params = ThumbnailParams::from_layout(&self.layout_params);
+        for path in missing {
+            let mut card = Card::new(path.clone());
+            if let Some(thumbnail) = self
+                .thumbnail_manager
+                .request_thumbnail(path.clone(), &thumbnail_params)
+            {
+                card.set_thumbnail_loaded(thumbnail);
+            } else {
+                card.set_thumbnail_loading();
+            }
+            self.back_cards.insert(path, card);
+        }
+    }
+
+    /// Images the color adjustment editor can page through: every unique
+    /// card front, then every unique back (per-card backs and the default)
+    fn color_adjust_preview_entries(&self) -> Vec<color_adjust_preview::PreviewEntry> {
+        let mut entries = Vec::new();
+
+        let mut seen_fronts = HashSet::new();
+        for card in &self.selected_cards {
+            if seen_fronts.insert(card.path.clone()) {
+                entries.push(color_adjust_preview::PreviewEntry {
+                    path: card.path.clone(),
+                    is_back: false,
+                });
+            }
+        }
+
+        let mut seen_backs = HashSet::new();
+        let back_paths = self
+            .selected_cards
+            .iter()
+            .filter_map(|card| card.back_path.as_ref())
+            .chain(self.layout_params.default_back_path.as_ref());
+        for path in back_paths {
+            if seen_backs.insert(path.clone()) {
+                entries.push(color_adjust_preview::PreviewEntry {
+                    path: path.clone(),
+                    is_back: true,
+                });
+            }
+        }
+
+        entries
+    }
+
+    fn pick_back_image(title: &str) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .add_filter("Images", &["jpg", "jpeg", "png", "tiff", "tif"])
+            .set_title(title)
+            .pick_file()
+    }
+
+    fn set_card_back(&mut self, index: usize) {
+        if index >= self.selected_cards.len() {
+            return;
+        }
+        if let Some(path) = Self::pick_back_image("Select Card Back Image") {
+            self.selected_cards[index].back_path = Some(path);
+        }
+    }
+
+    fn clear_card_back(&mut self, index: usize) {
+        if let Some(card) = self.selected_cards.get_mut(index) {
+            card.back_path = None;
+        }
+    }
+
+    fn pick_default_back(&mut self) {
+        if let Some(path) = Self::pick_back_image("Select Default Card Back Image") {
+            self.layout_params.default_back_path = Some(path);
+            self.save_settings();
+        }
+    }
+
     fn remove_card(&mut self, index: usize) {
         if index < self.selected_cards.len() {
             self.selected_cards.remove(index);
-            // Reset to first page when cards are removed
-            self.preview_state.reset_to_first_page();
+            // Keep the current preview page; the preview panel clamps it if the
+            // page count shrinks below the current page.
         }
     }
 
     fn update_card_copy_count(&mut self, index: usize, new_count: u32) {
         if index < self.selected_cards.len() {
             self.selected_cards[index].set_copy_count(new_count);
-            // Reset to first page when copy counts change to refresh layout
-            self.preview_state.reset_to_first_page();
+            // Keep the current preview page; the preview panel clamps it if the
+            // page count shrinks below the current page.
         }
     }
 
@@ -305,7 +485,12 @@ impl TcgLayoutApp {
 
     fn start_export(&mut self, format: ExportFormat, output_path: PathBuf) {
         let grid = layout::calculate_grid(&self.layout_params);
-        let pages = layout::distribute_cards(&self.selected_cards, &grid, &self.layout_params);
+        let pages = layout::distribute_cards_with_backs(
+            &self.selected_cards,
+            &grid,
+            &self.layout_params,
+            &self.back_cards,
+        );
         let total_pages = pages.len();
         let params = self.layout_params.clone();
 
@@ -418,6 +603,32 @@ impl TcgLayoutApp {
         }
     }
 
+    fn import_matched_cards(&mut self, matched_cards: &[MatchedCard]) {
+        // Clear existing cards and import fresh from matched paths
+        self.selected_cards.clear();
+        self.preview_state.clear_texture_cache();
+
+        let thumbnail_params = ThumbnailParams::from_layout(&self.layout_params);
+        for matched in matched_cards {
+            let mut card = Card::new(matched.matched_path.clone());
+            card.set_copy_count(matched.count);
+
+            // Request thumbnail
+            if let Some(thumbnail) = self
+                .thumbnail_manager
+                .request_thumbnail(matched.matched_path.clone(), &thumbnail_params)
+            {
+                card.set_thumbnail_loaded(thumbnail);
+            } else {
+                card.set_thumbnail_loading();
+            }
+
+            self.selected_cards.push(card);
+        }
+
+        self.preview_state.reset_to_first_page();
+    }
+
     fn apply_decklist(&mut self, matched_cards: &[MatchedCard]) {
         match self
             .decklist_manager
@@ -511,6 +722,234 @@ impl TcgLayoutApp {
             }
         }
     }
+
+    fn start_marvelcdb_fetch(&mut self, url: String, images_dir: PathBuf) {
+        // Cancel any existing task
+        if let Some(task) = self.marvelcdb_task.take() {
+            task.abort();
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        self.marvelcdb_receiver = Some(receiver);
+        self.decklist_state.is_fetching_marvelcdb = true;
+
+        let google_drive_api_key = self.decklist_state.google_drive_api_key.clone();
+        let google_drive_folder_url = self.decklist_state.google_drive_folder_url.clone();
+
+        let task = tokio::spawn(async move {
+            let _ = sender.send(MarvelCdbMessage::Started);
+
+            // Step 1: Fetch deck from MarvelCDB API
+            let fetched_deck = match marvelcdb::fetch_deck(&url).await {
+                Ok(deck) => deck,
+                Err(e) => {
+                    let _ = sender.send(MarvelCdbMessage::Failed(e.to_string()));
+                    return;
+                }
+            };
+
+            let _ = sender.send(MarvelCdbMessage::DeckFetched {
+                deck_name: fetched_deck.deck_name.clone(),
+                hero_name: fetched_deck.hero_name.clone(),
+            });
+
+            // Step 2: If Drive configured, match + download via Drive index
+            let drive_configured = !google_drive_api_key.trim().is_empty()
+                && !google_drive_folder_url.trim().is_empty();
+
+            if drive_configured {
+                let folder_id = match google_drive::parse_drive_folder_url(&google_drive_folder_url)
+                {
+                    Ok(id) => id,
+                    Err(e) => {
+                        log::warn!("Invalid Drive folder URL: {e}");
+                        // Treat as drive not configured — all cards unmatched
+                        let result = marvelcdb::MarvelCdbResult {
+                            deck_name: fetched_deck.deck_name.clone(),
+                            hero_name: fetched_deck.hero_name.clone(),
+                            matched_cards: Vec::new(),
+                            unmatched_cards: fetched_deck
+                                .cards
+                                .iter()
+                                .map(|c| marvelcdb::UnmatchedCard {
+                                    name: c.name.clone(),
+                                    count: c.count,
+                                    faction: c.faction_code.clone(),
+                                    pack_code: c.pack_code.clone(),
+                                })
+                                .collect(),
+                        };
+                        let _ = sender.send(MarvelCdbMessage::Completed(result));
+                        return;
+                    }
+                };
+
+                let client = google_drive::GoogleDriveClient::new(google_drive_api_key);
+                match client
+                    .match_and_download_cards(&fetched_deck, &images_dir, &folder_id, &sender)
+                    .await
+                {
+                    Ok(result) => {
+                        let _ = sender.send(MarvelCdbMessage::Completed(result));
+                    }
+                    Err(e) => {
+                        let _ = sender.send(MarvelCdbMessage::Failed(e.to_string()));
+                    }
+                }
+            } else {
+                // Drive not configured — all cards become unmatched
+                let result = marvelcdb::MarvelCdbResult {
+                    deck_name: fetched_deck.deck_name.clone(),
+                    hero_name: fetched_deck.hero_name.clone(),
+                    matched_cards: Vec::new(),
+                    unmatched_cards: fetched_deck
+                        .cards
+                        .iter()
+                        .map(|c| marvelcdb::UnmatchedCard {
+                            name: c.name.clone(),
+                            count: c.count,
+                            faction: c.faction_code.clone(),
+                            pack_code: c.pack_code.clone(),
+                        })
+                        .collect(),
+                };
+                let _ = sender.send(MarvelCdbMessage::Completed(result));
+            }
+        });
+
+        self.marvelcdb_task = Some(task);
+    }
+
+    fn process_marvelcdb_messages(&mut self) {
+        let mut messages = Vec::new();
+
+        if let Some(receiver) = &self.marvelcdb_receiver {
+            while let Ok(message) = receiver.try_recv() {
+                messages.push(message);
+            }
+        }
+
+        for message in messages {
+            match message {
+                MarvelCdbMessage::Started => {
+                    self.decklist_state.is_fetching_marvelcdb = true;
+                    self.decklist_state.marvelcdb_error = None;
+                    self.decklist_state.marvelcdb_progress =
+                        Some("Fetching deck from MarvelCDB...".to_string());
+                }
+                MarvelCdbMessage::Progress(msg) => {
+                    self.decklist_state.marvelcdb_progress = Some(msg);
+                }
+                MarvelCdbMessage::DeckFetched {
+                    deck_name,
+                    hero_name,
+                } => {
+                    self.decklist_state.marvelcdb_deck_name = Some(deck_name);
+                    self.decklist_state.marvelcdb_hero_name = Some(hero_name);
+                }
+                MarvelCdbMessage::Completed(result) => {
+                    self.decklist_state.is_fetching_marvelcdb = false;
+                    self.decklist_state.marvelcdb_progress = None;
+                    self.decklist_state.marvelcdb_deck_name = Some(result.deck_name);
+                    self.decklist_state.marvelcdb_hero_name = Some(result.hero_name);
+                    self.decklist_state.marvelcdb_matched = result.matched_cards.clone();
+                    self.decklist_state.marvelcdb_unmatched = result.unmatched_cards;
+                    self.decklist_state.marvelcdb_success =
+                        Some(format!("Found {} matches", result.matched_cards.len()));
+                    self.marvelcdb_receiver = None;
+                    self.marvelcdb_task = None;
+                    // Update index timestamp since match_and_download saves the index
+                    self.decklist_state.drive_index_updated_at =
+                        google_drive::load_drive_index_timestamp();
+                }
+                MarvelCdbMessage::Failed(error) => {
+                    self.decklist_state.is_fetching_marvelcdb = false;
+                    self.decklist_state.marvelcdb_progress = None;
+                    self.decklist_state.marvelcdb_error = Some(error);
+                    self.decklist_state.marvelcdb_success = None;
+                    self.marvelcdb_receiver = None;
+                    self.marvelcdb_task = None;
+                }
+            }
+        }
+    }
+
+    fn start_build_drive_index(&mut self) {
+        // Cancel any existing task
+        if let Some(task) = self.drive_index_task.take() {
+            task.abort();
+        }
+
+        let api_key = self.decklist_state.google_drive_api_key.clone();
+        let folder_url = self.decklist_state.google_drive_folder_url.clone();
+
+        let folder_id = match google_drive::parse_drive_folder_url(&folder_url) {
+            Ok(id) => id,
+            Err(e) => {
+                self.decklist_state.drive_index_error = Some(format!("Invalid folder URL: {e}"));
+                return;
+            }
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        self.drive_index_receiver = Some(receiver);
+        self.decklist_state.is_building_drive_index = true;
+        self.decklist_state.drive_index_error = None;
+        self.decklist_state.drive_index_success = None;
+
+        let task = tokio::spawn(async move {
+            let client = google_drive::GoogleDriveClient::new(api_key);
+            match client.build_index(&folder_id, &sender).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = sender.send(GoogleDriveMessage::Failed(e.to_string()));
+                }
+            }
+        });
+
+        self.drive_index_task = Some(task);
+    }
+
+    fn process_google_drive_messages(&mut self) {
+        let mut messages = Vec::new();
+
+        if let Some(receiver) = &self.drive_index_receiver {
+            while let Ok(message) = receiver.try_recv() {
+                messages.push(message);
+            }
+        }
+
+        for message in messages {
+            match message {
+                GoogleDriveMessage::IndexBuildProgress {
+                    folders_scanned,
+                    total_folders,
+                } => {
+                    self.decklist_state.drive_index_progress =
+                        Some((folders_scanned, total_folders));
+                }
+                GoogleDriveMessage::IndexBuildComplete {
+                    file_count,
+                    updated_at,
+                } => {
+                    self.decklist_state.is_building_drive_index = false;
+                    self.decklist_state.drive_index_progress = None;
+                    self.decklist_state.drive_index_updated_at = Some(updated_at);
+                    self.decklist_state.drive_index_success =
+                        Some(format!("Index built: {file_count} files indexed"));
+                    self.drive_index_receiver = None;
+                    self.drive_index_task = None;
+                }
+                GoogleDriveMessage::Failed(error) => {
+                    self.decklist_state.is_building_drive_index = false;
+                    self.decklist_state.drive_index_progress = None;
+                    self.decklist_state.drive_index_error = Some(error);
+                    self.drive_index_receiver = None;
+                    self.drive_index_task = None;
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for TcgLayoutApp {
@@ -521,12 +960,20 @@ impl eframe::App for TcgLayoutApp {
         // Process AI matching messages
         self.process_ai_matching_messages();
 
+        // Process MarvelCDB messages
+        self.process_marvelcdb_messages();
+
+        // Process Google Drive messages
+        self.process_google_drive_messages();
+
         // Process export messages
         self.process_export_messages();
 
         // Request repaint if we have pending thumbnails or AI matching to keep UI updating
         if self.thumbnail_manager.has_pending_requests()
             || self.decklist_state.is_processing
+            || self.decklist_state.is_fetching_marvelcdb
+            || self.decklist_state.is_building_drive_index
             || self.export_state.is_exporting
         {
             ctx.request_repaint();
@@ -580,9 +1027,16 @@ impl eframe::App for TcgLayoutApp {
         let mut should_import = false;
         let mut copy_count_changes = None;
         let mut reorder_action = None;
+        let mut back_action = None;
         let mut decklist_matches_to_apply = None;
+        let mut marvelcdb_import = None;
         let mut start_ai_matching = None;
+        let mut start_marvelcdb_fetch = None;
         let mut api_key_changed = false;
+        let mut marvel_dir_changed = false;
+        let mut google_drive_api_key_changed = false;
+        let mut google_drive_folder_url_changed = false;
+        let mut start_build_drive_index_action = false;
 
         egui::SidePanel::left("left_panel")
             .resizable(true)
@@ -603,14 +1057,16 @@ impl eframe::App for TcgLayoutApp {
                     card_list_panel::show_card_list_panel(
                         ui,
                         &self.selected_cards,
+                        self.layout_params.enable_duplex,
                         |index| cards_to_remove = Some(index),
                         || should_import = true,
                         |index, new_count| copy_count_changes = Some((index, new_count)),
                         |index, is_move_up| reorder_action = Some((index, is_move_up)),
+                        |index, is_set| back_action = Some((index, is_set)),
                     );
                 } else {
                     // Decklist panel
-                    api_key_changed = decklist_panel::show_decklist_panel(
+                    let actions = decklist_panel::show_decklist_panel(
                         ui,
                         &mut self.decklist_state,
                         |matched_cards| decklist_matches_to_apply = Some(matched_cards.to_vec()),
@@ -618,7 +1074,16 @@ impl eframe::App for TcgLayoutApp {
                             // Set up AI matching request
                             start_ai_matching = Some((api_key.to_string(), entries.to_vec()));
                         },
+                        |url, images_dir| {
+                            start_marvelcdb_fetch = Some((url.to_string(), images_dir.clone()));
+                        },
+                        |matched_cards| marvelcdb_import = Some(matched_cards.to_vec()),
                     );
+                    api_key_changed = actions.api_key_changed;
+                    marvel_dir_changed = actions.marvel_dir_changed;
+                    google_drive_api_key_changed = actions.google_drive_api_key_changed;
+                    google_drive_folder_url_changed = actions.google_drive_folder_url_changed;
+                    start_build_drive_index_action = actions.start_build_drive_index;
                 }
             });
 
@@ -646,9 +1111,23 @@ impl eframe::App for TcgLayoutApp {
             self.import_images();
         }
 
-        // Handle decklist application
+        // Handle per-card back image changes
+        if let Some((index, is_set)) = back_action {
+            if is_set {
+                self.set_card_back(index);
+            } else {
+                self.clear_card_back(index);
+            }
+        }
+
+        // Handle decklist application (AI matching — reorders existing cards)
         if let Some(matched_cards) = decklist_matches_to_apply {
             self.apply_decklist(&matched_cards);
+        }
+
+        // Handle MarvelCDB import (imports cards from file paths)
+        if let Some(matched_cards) = marvelcdb_import {
+            self.import_matched_cards(&matched_cards);
         }
 
         // Handle AI matching request
@@ -656,12 +1135,41 @@ impl eframe::App for TcgLayoutApp {
             self.start_ai_matching(api_key, entries);
         }
 
+        // Handle MarvelCDB fetch request
+        if let Some((url, images_dir)) = start_marvelcdb_fetch {
+            self.start_marvelcdb_fetch(url, images_dir);
+        }
+
         // Save API key if it changed
         if api_key_changed {
             self.save_api_key();
         }
 
+        // Save settings if marvel dir changed
+        if marvel_dir_changed {
+            self.save_settings();
+        }
+
+        // Save Google Drive API key if it changed
+        if google_drive_api_key_changed {
+            self.save_google_drive_api_key();
+        }
+
+        // Save settings if Google Drive folder URL changed
+        if google_drive_folder_url_changed {
+            self.save_settings();
+        }
+
+        // Handle Google Drive index build request
+        if start_build_drive_index_action {
+            self.start_build_drive_index();
+        }
+
         // Right pane - Parameters form
+        let mut sharpen_preview_requested = false;
+        let mut color_adjust_preview_requested = false;
+        let mut default_back_pick_requested = false;
+        let has_cards = !self.selected_cards.is_empty();
         let settings_changed = egui::SidePanel::right("parameters_panel")
             .resizable(true)
             .default_width(300.0)
@@ -675,6 +1183,10 @@ impl eframe::App for TcgLayoutApp {
                     &mut self.success_message_timer,
                     &mut self.page_size_option,
                     &mut self.card_size_option,
+                    has_cards,
+                    &mut sharpen_preview_requested,
+                    &mut color_adjust_preview_requested,
+                    &mut default_back_pick_requested,
                 )
             })
             .inner;
@@ -684,23 +1196,80 @@ impl eframe::App for TcgLayoutApp {
             self.save_settings();
         }
 
-        // Check if bleed settings changed and re-request thumbnails if needed
-        let bleed_changed = self.layout_params.enable_bleed != self.previous_bleed_enabled
-            || (self.layout_params.bleed_mm - self.previous_bleed_mm).abs() > 0.01;
+        // Open the default back image picker
+        if default_back_pick_requested {
+            self.pick_default_back();
+        }
 
-        if bleed_changed {
+        // Open the full-resolution sharpen preview for the first card
+        if sharpen_preview_requested {
+            if let Some(card) = self.selected_cards.first() {
+                self.sharpen_preview_state
+                    .open(card.path.clone(), self.layout_params.sharpen_amount);
+            }
+        }
+
+        // Show the sharpen preview window if open
+        if self.sharpen_preview_state.is_open() {
+            match sharpen_preview::show_sharpen_preview_window(ctx, &mut self.sharpen_preview_state)
+            {
+                SharpenPreviewAction::Apply(amount) => {
+                    self.layout_params.sharpen_amount = amount;
+                    self.layout_params.enable_sharpen = true;
+                    self.save_settings();
+                    // Thumbnail refresh is handled by the change detection below
+                }
+                SharpenPreviewAction::None => {}
+            }
+        }
+
+        // Open the color adjustment editor over all card fronts and backs
+        if color_adjust_preview_requested {
+            let entries = self.color_adjust_preview_entries();
+            if !entries.is_empty() {
+                self.color_adjust_preview_state
+                    .open(entries, self.layout_params.hsl_adjustments.clone());
+            }
+        }
+
+        // Show the color adjustment editor window if open. Color adjustments
+        // intentionally don't affect thumbnails, so no cache invalidation.
+        if self.color_adjust_preview_state.is_open() {
+            match color_adjust_preview::show_color_adjust_preview_window(
+                ctx,
+                &mut self.color_adjust_preview_state,
+            ) {
+                ColorAdjustPreviewAction::Apply(adjustments) => {
+                    self.layout_params.hsl_adjustments = adjustments;
+                    self.layout_params.enable_color_adjust = true;
+                    self.save_settings();
+                }
+                ColorAdjustPreviewAction::None => {}
+            }
+        }
+
+        // Check if image processing settings changed and re-request thumbnails if needed
+        let thumbnails_outdated = self.layout_params.enable_bleed != self.previous_bleed_enabled
+            || (self.layout_params.bleed_mm - self.previous_bleed_mm).abs() > 0.01
+            || self.layout_params.enable_sharpen != self.previous_sharpen_enabled
+            || (self.layout_params.sharpen_amount - self.previous_sharpen_amount).abs() > 0.001;
+
+        if thumbnails_outdated {
             // Clear texture cache to force regeneration of preview textures
             self.preview_state.clear_texture_cache();
 
-            // Re-request all thumbnails with new bleed settings
-            for card in &mut self.selected_cards {
-                // Request new thumbnail with updated bleed settings
-                if let Some(thumbnail) = self.thumbnail_manager.request_thumbnail(
-                    card.path.clone(),
-                    self.layout_params.bleed_mm,
-                    self.layout_params.enable_bleed,
-                    self.layout_params.card_size,
-                ) {
+            // Re-request all thumbnails (fronts and backs) with new processing settings
+            let thumbnail_params = ThumbnailParams::from_layout(&self.layout_params);
+            for card in self
+                .selected_cards
+                .iter_mut()
+                .chain(self.back_cards.values_mut())
+            {
+                // Request new thumbnail with updated processing settings
+                if let Some(thumbnail) = self
+                    .thumbnail_manager
+                    .request_thumbnail(card.path.clone(), &thumbnail_params)
+                {
                     // Cache hit - set thumbnail immediately
                     card.set_thumbnail_loaded(thumbnail);
                 } else {
@@ -712,7 +1281,12 @@ impl eframe::App for TcgLayoutApp {
             // Update tracked state
             self.previous_bleed_enabled = self.layout_params.enable_bleed;
             self.previous_bleed_mm = self.layout_params.bleed_mm;
+            self.previous_sharpen_enabled = self.layout_params.enable_sharpen;
+            self.previous_sharpen_amount = self.layout_params.sharpen_amount;
         }
+
+        // Register thumbnail-managed Cards for any newly referenced back images
+        self.ensure_back_cards_registered();
 
         // Center pane - Preview
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -720,6 +1294,7 @@ impl eframe::App for TcgLayoutApp {
                 ui,
                 &self.layout_params,
                 &self.selected_cards,
+                &self.back_cards,
                 &mut self.preview_state,
             );
         });
