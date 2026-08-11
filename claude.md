@@ -15,7 +15,7 @@ Desktop application that automatically lays out Trading Card Game (TCG) card ima
 
 ### Build Commands
 - `cargo run --bin tcg_layout` - Run the application
-- `cargo test` - Run all tests (~294 test executions; shared modules run in both the lib and bin trees)
+- `cargo test` - Run all tests (~342 test executions; shared modules run in both the lib and bin trees)
 - `cargo clippy` - Run linter checks
 - `cargo fmt` - Format code
 
@@ -89,6 +89,8 @@ struct LayoutParams {
     sharpen_threshold: f32,          // Local contrast below this fraction is left alone (0.0-0.2, serde default 0.02)
     enable_sharpen: bool,            // Whether sharpening is active (serde default false)
     center_layout: bool,             // Center cards on page (ignores margins)
+    printer_margins: Margins,        // Printer's unprintable border in mm (serde default 5mm uniform)
+    enable_printer_margins: bool,    // Whether to lay out and export for the printable area (serde default false)
     hsl_adjustments: Vec<HslAdjustment>, // Targeted color adjustments (serde default empty)
     enable_color_adjust: bool,       // Whether color adjustments are active (serde default false)
     enable_duplex: bool,             // Double-sided: generate a back page after each front page (serde default false)
@@ -148,14 +150,34 @@ struct PageLayout {
 ### Key Components
 
 **1. Layout Calculator** (`layout.rs` - pure functions, no side effects)
-- `calculate_grid(params)` -> `GridLayout` - Determines rows/cols from page constraints. When centering is enabled, margins are ignored for grid calculation. Handles portrait/landscape. Ensures minimum 1x1 grid.
+- `calculate_grid(params)` -> `GridLayout` - Determines rows/cols from page constraints. When centering is enabled, margins are ignored for grid calculation. Handles portrait/landscape. Ensures minimum 1x1 grid. Printer margins (see below) are a floor on the user's margins, since a card laid out inside the unprintable border would be clipped off the print.
 - `distribute_cards(cards, params)` -> `Vec<PageLayout>` - Expands cards by copy_count, chunks into pages, calculates positions per card. Delegates to `distribute_cards_with_backs` with an empty back map.
 - `distribute_cards_with_backs(cards, grid, params, back_cards)` -> `Vec<PageLayout>` - Same, but when `enable_duplex` is on, emits a `PageSide::Back` page after every front page (interleaved for duplex printing). Back slots use `card.back_path` falling back to `params.default_back_path`; cards with neither leave a gap, and an empty back page is still emitted to preserve front/back pairing. `back_cards: &HashMap<PathBuf, Card>` supplies thumbnail-loaded Card instances (missing paths get `Card::placeholder`).
 - `mirror_position_for_back(position, params)` -> `CardPosition` - Mirrors a front position onto the back page for the configured flip edge (long-edge flip mirrors x on portrait pages, y on landscape; short-edge is the opposite), then adds `back_offset`. The axis decision lives in `LayoutParams::back_mirror_is_horizontal()`.
 - When the mirror is vertical (horizontal-axis flip), back images must also print rotated 180° or cut cards come out head-to-toe. `LayoutParams::backs_rotated_180()` encodes this; exporters and the preview rotate back-page images when `page.side == Back && backs_rotated_180()` (PDF rotates pixels via `image::rotate180` with the dedup cache keyed by `(path, rotated)`; SVG uses a `rotate(180 cx cy)` transform; the preview inverts texture UVs).
 - `calculate_card_position(index, grid, params)` -> `CardPosition` - Computes x,y for a card at a given index. Uses effective_margins() and respects fill order.
 - `generate_positions(grid, params)` -> `Vec<CardPosition>` - All positions for one page.
-- `calculate_cut_marks(grid, params)` -> `Vec<CutMark>` - Generates cut marks for **every** intersection of a vertical and a horizontal trim line, interior ones included. `cut_line_coords()` builds the distinct trim coordinates per axis (adjacent cards with zero spacing share an edge, so duplicates collapse within `CUT_LINE_EPSILON_MM`); each trim line then gets one segment straddling every crossing line, reaching `CUT_MARK_OVERLAP_MM` (2.0, capped at half the card dimension) past it on both sides. The outermost segments run on out to the page edges instead of stopping at the overlap. Result: a cross at every card corner, so cutting along one line always leaves a stub of every mark perpendicular to it on both sides of the blade. With nonzero spacing a gutter has two distinct trim lines, so the four adjacent card corners render as a hash rather than a single cross; butted cards (zero spacing) give one clean cross. Because the overlap reaches into the card area — and because bleed images cover the margins — all three renderers (SVG, PDF, preview) draw cut marks **after/on top of** the card images.
+- `calculate_cut_marks(grid, params)` -> `Vec<CutMark>` - Generates cut marks for **every** intersection of a vertical and a horizontal trim line, interior ones included. `cut_line_coords()` builds the distinct trim coordinates per axis (adjacent cards with zero spacing share an edge, so duplicates collapse within `CUT_LINE_EPSILON_MM`); each trim line then gets one segment straddling every crossing line, reaching `CUT_MARK_OVERLAP_MM` (2.0, capped at half the card dimension) past it on both sides. The outermost segments run on out to the page edges — or the printable area's edges when printer margins are configured — instead of stopping at the overlap. Result: a cross at every card corner, so cutting along one line always leaves a stub of every mark perpendicular to it on both sides of the blade. With nonzero spacing a gutter has two distinct trim lines, so the four adjacent card corners render as a hash rather than a single cross; butted cards (zero spacing) give one clean cross. Because the overlap reaches into the card area — and because bleed images cover the margins — all three renderers (SVG, PDF, preview) draw cut marks **after/on top of** the card images.
+
+**1b. Printer Margins** (`types.rs` + all three renderers)
+
+Many printers physically cannot print to the sheet edge, and drivers deal with
+that by scaling and re-centering the page into the printable area — which shrinks
+the cards (fatal for real card sizes) and shifts the layout off center.
+`enable_printer_margins` + `printer_margins` fix this by making the exported page
+*be* the printable area, so there is nothing left for the driver to fit: "fit to
+printable area" scales by exactly 1.0 and centers exactly.
+
+- Layout math stays in **physical sheet coordinates** throughout (grid, positions, centering, cut marks, duplex mirroring). Only the exporters re-express coordinates, translating by `printable_origin()` at draw time. This keeps duplex mirroring correct — the sheet flips about the *sheet's* center, not the printable area's — and lets the preview keep showing the real sheet.
+- `effective_printer_margins()` - the configured border, or all zeros when disabled. Read against the oriented page (as the sheet comes out of the printer), so they are not rotated for landscape.
+- `printable_size()` - `effective_page_size()` minus the border, floored at `MIN_PRINTABLE_MM`. **This is the page size both exporters emit.**
+- `printable_origin()` - `(left, top)`, the sheet-to-printable-area translation the exporters apply to every card and cut mark.
+- `layout_printer_margins()` - the border the *layout* keeps clear. Same as the printable border, except with duplex on it is symmetrized along the mirror axis: a back page is the front mirrored about the sheet while the unprintable border does **not** mirror with it, so a card only prints in register if its mirror image also lands inside the printable area. That region is the intersection of the printable area and its own mirror, i.e. the larger of the two facing margins on both sides.
+- `effective_margins(grid)` floors each side at `layout_printer_margins()`. Consequence worth knowing: turning printer margins on **cannot change an existing layout** unless the printer's border actually exceeds the user's margins on some side.
+- With centering on, the grid is centered on the physical **sheet**, then clamped inside the printable band (`center_offset()`). These differ only when the printer's margins are asymmetric — which is common, since the feed edge is usually the largest. If the grid is taller/wider than the band at all, the near edge is kept clear so the overflow clips on one side rather than both.
+- Cut marks' outermost runs stop at the printable boundary rather than the sheet edge, so no mark is clipped mid-print and an off-center printable area doesn't clip them asymmetrically.
+- The preview still draws the whole sheet and shades the unprintable border over the cards, so it's visible both where the printer can't reach and that nothing was laid out there.
+- **Not** part of the thumbnail `CacheKey` — printer margins never change a card's pixels.
 
 **2. Thumbnail Manager** (`thumbnail_manager.rs`)
 - Async background loading via tokio::spawn with blocking tasks
@@ -205,6 +227,7 @@ struct PageLayout {
 - `detect_card_type_by_aspect_ratio()` - Matches image aspect ratio to known card types
 
 **5. Export Pipeline**
+- Both exporters emit pages of `params.printable_size()` and subtract `params.printable_origin()` from every drawn coordinate. With printer margins off that is the whole sheet and a zero offset, so output is byte-identical to before.
 - **SVG** (`svg_export.rs`): `SvgExporter` with `export_page()`, `export_pages()`, `export_pages_single_file()`. Supports cut marks, bleed/sharpen (when either is active, processes images into a `{name}_images/` directory as `{stem}_processed.png`), multi-page with Inkscape layer definitions. Unprocessed images use file:// URI references (not embedded).
 - **PDF** (`pdf_export.rs`): `PdfExporter` with `export_pages()`. Uses printpdf 0.9. Features image deduplication via HashMap cache, intelligent DPI calculation to fill card width, Y-axis correction (PDF origin is bottom-left), aspect ratio correction via scale_y, bleed/sharpen image processing via `prepare_processed_image()` (encoded to PNG in-memory), cut marks (gray 0.5pt lines), Flate compression.
 
@@ -260,6 +283,7 @@ struct PageLayout {
 - Targeted HSL color adjustments with dropper sampling, per-adjustment front/back scope, and full-resolution editor window that cycles through all fronts and backs (export-only; not in thumbnails)
 - Cut marks generation
 - Layout centering (ignores margins, centers grid on page)
+- Printer margins: exports sized to the printer's printable area so a forced-margin printer neither scales nor shifts the page
 - Double-sided (duplex) printing: interleaved back pages with mirrored positions (flip-edge aware), automatic 180° back rotation when the flip axis requires it (cards always cut head-to-head), per-card and default back images, printer calibration offset, front-only cut marks
 - Settings persistence (JSON file + secure keyring for API key)
 - Decklist parsing and AI-powered card-to-file matching (OpenAI)
@@ -279,7 +303,7 @@ struct PageLayout {
 
 ### Test Structure
 - Unit tests colocated in each module using `#[cfg(test)]`
-- ~294 test executions total (shared modules compile into both lib and bin trees)
+- ~342 test executions total (shared modules compile into both lib and bin trees)
 - Async tests in `thumbnail_manager.rs` use tokio runtime
 
 ### Running Tests
@@ -295,15 +319,15 @@ cargo test settings           # Settings persistence tests
 ```
 
 ### Test Coverage Areas
-- Layout grid calculations (44 tests): grid sizing, distribution, positions, centering, cut marks (page-edge runs, crosses at every intersection incl. interior, zero-spacing edge collapse, `cut_line_coords` coordinates, half-card overlap cap), duplex mirroring/interleaving
+- Layout grid calculations (49 tests): grid sizing, distribution, positions, centering, cut marks (page-edge runs, crosses at every intersection incl. interior, zero-spacing edge collapse, `cut_line_coords` coordinates, half-card overlap cap), duplex mirroring/interleaving, printer margins (grid unchanged when user margins are larger, grid shrinks when they aren't, cards and cut marks stay inside the printable area, duplex backs survive the mirror)
 - Image processing (6 tests): thumbnails, aspect ratio, DPI
 - Bleed (11 tests): pixel calculations, edge replication, zero bleed
 - Sharpen (8 tests): identity at zero, flat-image invariance, edge contrast, alpha preservation
 - Color adjust (25 tests): RGB↔HSL round trip, chroma recovery, noop/empty identity, gray and near-black/near-white invariance, hue targeting and wraparound, feather bounds, alpha preservation, scope filtering (per-side activity, legacy JSON defaults to All), dropper sampling (circular mean, seam, gray, near-black noise rejection, bounds)
 - Thumbnail manager (7 tests): async loading, caching, deduplication, cache key discrimination
-- SVG export (21 tests): single/multi-page, cut marks (front pages only, emitted after images), bleed, sharpening, processed image directory, backs-only adjustment scoping
-- PDF export (13 tests): multi-page, real images, sharpening, sharpening + bleed, duplex end-to-end, backs-only adjustment scoping
-- Settings (5 tests): serialization, defaults, duplex backwards compatibility
+- SVG export (24 tests): single/multi-page, cut marks (front pages only, emitted after images), bleed, sharpening, processed image directory, backs-only adjustment scoping, printer margins (page size is the printable area, content shifted into it, unshifted when disabled)
+- PDF export (17 tests): multi-page, real images, sharpening, sharpening + bleed, duplex end-to-end, backs-only adjustment scoping, printer margins (MediaBox is the printable area / the whole sheet when disabled, duplex end-to-end)
+- Settings (9 tests): serialization, defaults, duplex backwards compatibility, printer margin backwards compatibility (absent fields load with the feature off) and round trip
 - Types (various): enum behavior, defaults, validation
 
 ## Common Development Tasks

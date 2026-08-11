@@ -1,5 +1,5 @@
 use crate::layout::{calculate_cut_marks, calculate_grid};
-use crate::types::{LayoutParams, PageLayout, PageOrientation, PageSide};
+use crate::types::{LayoutParams, PageLayout, PageSide};
 use anyhow::{Context, Result};
 use printpdf::*;
 use printpdf::{ImageCompression, ImageOptimizationOptions};
@@ -30,6 +30,7 @@ impl PdfExporter {
         let mut warnings = Vec::new();
 
         let (page_width, page_height) = self.get_page_dimensions();
+        let (origin_x, origin_y) = self.params.printable_origin();
 
         // Build cut mark operations (same for every page)
         let grid = calculate_grid(&self.params);
@@ -97,10 +98,12 @@ impl PdfExporter {
                 let dpi = img_pixel_width * 25.4 / card_w_mm;
                 let scale_y = (card_h_mm * img_pixel_width) / (card_w_mm * img_pixel_height);
 
-                // PDF Y-axis is bottom-up; layout Y-axis is top-down.
-                // pdf_y = page_height - position.y - card_height
-                let pdf_x_pt = Mm(img_x_mm).into_pt();
-                let pdf_y_pt = Mm(page_height - img_y_mm - card_h_mm).into_pt();
+                // Layout coordinates are on the physical sheet; the page is the
+                // printable area, so shift by the printable area's origin.
+                // PDF Y-axis is also bottom-up while the layout Y-axis is
+                // top-down: pdf_y = page_height - y - card_height
+                let pdf_x_pt = Mm(img_x_mm - origin_x).into_pt();
+                let pdf_y_pt = Mm(page_height - (img_y_mm - origin_y) - card_h_mm).into_pt();
 
                 ops.push(Op::UseXobject {
                     id: xobject_id,
@@ -147,14 +150,14 @@ impl PdfExporter {
         Ok(())
     }
 
+    /// The size of the emitted PDF page: the printer's printable area, which
+    /// is the whole sheet unless printer margins are configured.
     fn get_page_dimensions(&self) -> (f32, f32) {
-        match self.params.page_orientation {
-            PageOrientation::Portrait => self.params.page_size,
-            PageOrientation::Landscape => (self.params.page_size.1, self.params.page_size.0),
-        }
+        self.params.printable_size()
     }
 
     fn build_cut_mark_ops(&self, cut_marks: &[crate::types::CutMark], page_height: f32) -> Vec<Op> {
+        let (origin_x, origin_y) = self.params.printable_origin();
         let mut ops = Vec::new();
 
         if cut_marks.is_empty() {
@@ -168,18 +171,20 @@ impl PdfExporter {
         ops.push(Op::SetOutlineThickness { pt: Pt(0.5) });
 
         for mark in cut_marks {
-            // Flip Y coordinates for PDF
-            let y1 = page_height - mark.y1;
-            let y2 = page_height - mark.y2;
+            // Sheet coordinates -> printable-area coordinates, then flip Y for PDF
+            let x1 = mark.x1 - origin_x;
+            let x2 = mark.x2 - origin_x;
+            let y1 = page_height - (mark.y1 - origin_y);
+            let y2 = page_height - (mark.y2 - origin_y);
 
             let line = Line {
                 points: vec![
                     LinePoint {
-                        p: Point::new(Mm(mark.x1), Mm(y1)),
+                        p: Point::new(Mm(x1), Mm(y1)),
                         bezier: false,
                     },
                     LinePoint {
-                        p: Point::new(Mm(mark.x2), Mm(y2)),
+                        p: Point::new(Mm(x2), Mm(y2)),
                         bezier: false,
                     },
                 ],
@@ -711,5 +716,137 @@ mod tests {
 
         assert!(result.is_ok(), "Export failed: {:?}", result.err());
         assert_eq!(progress_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// The page box printpdf writes, in PDF points rounded to the integer it
+    /// emits.
+    fn media_box_of(pdf_bytes: &[u8]) -> String {
+        let text = String::from_utf8_lossy(pdf_bytes);
+        let start = text.find("/MediaBox[").expect("PDF declares a MediaBox");
+        let rest = &text[start + "/MediaBox[".len()..];
+        let end = rest.find(']').expect("MediaBox is closed");
+        rest[..end].to_string()
+    }
+
+    fn expected_media_box(params: &LayoutParams) -> String {
+        let (width_mm, height_mm) = params.printable_size();
+        let to_pt = |mm: f32| (mm * 72.0 / 25.4).round();
+        format!("0 0 {} {}", to_pt(width_mm), to_pt(height_mm))
+    }
+
+    fn export_one_card_page(params: &LayoutParams, temp_dir: &TempDir) -> Vec<u8> {
+        let img_path = temp_dir.path().join("printer_margin_card.png");
+        let img = ::image::ImageBuffer::from_fn(100, 140, |_, _| ::image::Rgba([255u8, 0, 0, 255]));
+        img.save(&img_path).unwrap();
+
+        let pages = vec![PageLayout {
+            page_number: 1,
+            cards: vec![(Card::new(img_path), CardPosition { x: 5.0, y: 5.0 })],
+            side: PageSide::Front,
+        }];
+
+        let output_path = temp_dir.path().join("printer_margins.pdf");
+        export_pages_to_pdf(&pages, params, &output_path).unwrap();
+        std::fs::read(&output_path).unwrap()
+    }
+
+    #[test]
+    fn test_get_page_dimensions_is_printable_area() {
+        let params = LayoutParams {
+            page_size: (210.0, 297.0),
+            enable_printer_margins: true,
+            printer_margins: crate::types::Margins {
+                top: 3.0,
+                right: 3.0,
+                bottom: 15.0,
+                left: 3.0,
+            },
+            ..create_test_params()
+        };
+        let exporter = PdfExporter::new(params);
+
+        assert_eq!(exporter.get_page_dimensions(), (204.0, 279.0));
+    }
+
+    #[test]
+    fn test_pdf_page_box_is_printable_area() {
+        let temp_dir = TempDir::new().unwrap();
+        let params = LayoutParams {
+            enable_printer_margins: true,
+            printer_margins: crate::types::Margins::uniform(4.0),
+            ..create_test_params()
+        };
+
+        let bytes = export_one_card_page(&params, &temp_dir);
+
+        // 92 x 142 mm rather than the 100 x 150 mm sheet: a page that already
+        // matches the printable area is neither scaled nor shifted to fit it
+        assert_eq!(params.printable_size(), (92.0, 142.0));
+        assert_eq!(media_box_of(&bytes), expected_media_box(&params));
+    }
+
+    #[test]
+    fn test_pdf_page_box_is_whole_sheet_when_disabled() {
+        let temp_dir = TempDir::new().unwrap();
+        let params = LayoutParams {
+            enable_printer_margins: false,
+            printer_margins: crate::types::Margins::uniform(4.0),
+            ..create_test_params()
+        };
+
+        let bytes = export_one_card_page(&params, &temp_dir);
+
+        assert_eq!(params.printable_size(), (100.0, 150.0));
+        assert_eq!(media_box_of(&bytes), expected_media_box(&params));
+    }
+
+    #[test]
+    fn test_pdf_duplex_export_with_printer_margins() {
+        let temp_dir = TempDir::new().unwrap();
+        let img_path = temp_dir.path().join("front.png");
+        let back_path = temp_dir.path().join("back.png");
+        ::image::ImageBuffer::from_fn(60, 84, |_, _| ::image::Rgba([10u8, 200, 10, 255]))
+            .save(&img_path)
+            .unwrap();
+        ::image::ImageBuffer::from_fn(60, 84, |_, _| ::image::Rgba([10u8, 10, 200, 255]))
+            .save(&back_path)
+            .unwrap();
+
+        let params = LayoutParams {
+            enable_duplex: true,
+            flip_edge: crate::types::FlipEdge::ShortEdge,
+            default_back_path: Some(back_path),
+            enable_printer_margins: true,
+            printer_margins: crate::types::Margins {
+                top: 3.0,
+                right: 3.0,
+                bottom: 12.0,
+                left: 3.0,
+            },
+            ..create_test_params()
+        };
+
+        let cards = vec![Card::new(img_path)];
+        let grid = calculate_grid(&params);
+        let pages = crate::layout::distribute_cards(&cards, &grid, &params);
+        assert_eq!(pages.len(), 2);
+
+        let output_path = temp_dir.path().join("duplex.pdf");
+        export_pages_to_pdf(&pages, &params, &output_path).unwrap();
+
+        let bytes = std::fs::read(&output_path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+        assert_eq!(media_box_of(&bytes), expected_media_box(&params));
+
+        // Back cards mirror about the sheet, so they must still land on the
+        // page once shifted into the printable area
+        let (origin_x, origin_y) = params.printable_origin();
+        let (printable_width, printable_height) = params.printable_size();
+        for (_, position) in &pages[1].cards {
+            assert!(position.x - origin_x >= 0.0);
+            assert!(position.y - origin_y >= 0.0);
+            assert!(position.x - origin_x + params.card_size.0 <= printable_width);
+            assert!(position.y - origin_y + params.card_size.1 <= printable_height);
+        }
     }
 }

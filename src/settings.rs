@@ -301,6 +301,47 @@ mod tests {
     }
 
     #[test]
+    fn test_settings_backwards_compatible_without_printer_margin_fields() {
+        // Settings saved before printer margins existed must load with the
+        // feature off, so an existing layout is unchanged by the upgrade
+        let settings = AppSettings::default();
+        let mut value = serde_json::to_value(&settings).unwrap();
+        let params = value["layout_params"].as_object_mut().unwrap();
+        params.remove("printer_margins");
+        params.remove("enable_printer_margins");
+
+        let loaded: AppSettings = serde_json::from_value(value).unwrap();
+        assert!(!loaded.layout_params.enable_printer_margins);
+        assert_eq!(
+            loaded.layout_params.effective_printer_margins(),
+            crate::types::Margins::uniform(0.0)
+        );
+        // The stored value is still a usable starting point for the UI
+        assert!(loaded.layout_params.printer_margins.top > 0.0);
+    }
+
+    #[test]
+    fn test_settings_round_trip_printer_margins() {
+        let mut settings = AppSettings::default();
+        settings.layout_params.enable_printer_margins = true;
+        settings.layout_params.printer_margins = crate::types::Margins {
+            top: 3.0,
+            right: 3.2,
+            bottom: 12.7,
+            left: 3.4,
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: AppSettings = serde_json::from_str(&json).unwrap();
+
+        assert!(loaded.layout_params.enable_printer_margins);
+        assert_eq!(
+            loaded.layout_params.printer_margins,
+            settings.layout_params.printer_margins
+        );
+    }
+
+    #[test]
     fn test_settings_serialization() {
         let settings = AppSettings::default();
         let json = serde_json::to_string(&settings).unwrap();

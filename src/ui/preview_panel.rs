@@ -261,6 +261,52 @@ pub fn show_preview_panel(
         }
     }
 
+    // Shade the printer's unprintable border over the cards, so it's obvious
+    // both where the printer can't reach and that nothing was laid out there.
+    // The preview is the physical sheet; exports emit just the area inside.
+    if layout_params.enable_printer_margins {
+        let printer = layout_params.effective_printer_margins();
+        let mm = 3.0 * scale;
+        let printable_rect = egui::Rect::from_min_max(
+            egui::pos2(center_x + printer.left * mm, center_y + printer.top * mm),
+            egui::pos2(
+                center_x + (page_width - printer.right) * mm,
+                center_y + (page_height - printer.bottom) * mm,
+            ),
+        );
+
+        let shade = egui::Color32::from_black_alpha(60);
+        for band in [
+            // top, bottom, left, right strips between sheet and printable area
+            egui::Rect::from_min_max(
+                preview_rect.min,
+                egui::pos2(preview_rect.max.x, printable_rect.min.y),
+            ),
+            egui::Rect::from_min_max(
+                egui::pos2(preview_rect.min.x, printable_rect.max.y),
+                preview_rect.max,
+            ),
+            egui::Rect::from_min_max(
+                egui::pos2(preview_rect.min.x, printable_rect.min.y),
+                egui::pos2(printable_rect.min.x, printable_rect.max.y),
+            ),
+            egui::Rect::from_min_max(
+                egui::pos2(printable_rect.max.x, printable_rect.min.y),
+                egui::pos2(preview_rect.max.x, printable_rect.max.y),
+            ),
+        ] {
+            if band.is_positive() {
+                ui.painter().rect_filled(band, egui::Rounding::ZERO, shade);
+            }
+        }
+
+        ui.painter().rect_stroke(
+            printable_rect,
+            egui::Rounding::ZERO,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 120, 120)),
+        );
+    }
+
     // Show grid info
     ui.add_space(8.0);
     ui.separator();
