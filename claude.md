@@ -161,7 +161,7 @@ struct PageLayout {
 - Async background loading via tokio::spawn with blocking tasks
 - LRU cache with configurable capacity (default 100, app uses 200)
 - Requests take a `ThumbnailParams` struct (defined in `image_processing.rs`, built via `ThumbnailParams::from_layout()`) carrying bleed, sharpen, and card size settings
-- Cache key includes: path, file modification time, bleed_enabled, bleed_mm (rounded to tenths), sharpen_enabled, sharpen_amount (rounded to hundredths)
+- Cache key includes: path, file modification time, bleed_enabled, bleed_mm (rounded to tenths), sharpen_enabled, sharpen_amount and sharpen_radius (rounded to hundredths), sharpen_threshold (rounded to thousandths)
 - Avoids duplicate requests for the same file
 - Message-passing architecture: `ThumbnailRequest` -> background task -> `ThumbnailMessage`
 - Key methods: `request_thumbnail()`, `try_recv_message()`, `cache_stats()`, `clear_cache()`
@@ -298,12 +298,12 @@ cargo test settings           # Settings persistence tests
 - Layout grid calculations (39 tests): grid sizing, distribution, positions, centering, cut marks, duplex mirroring/interleaving
 - Image processing (6 tests): thumbnails, aspect ratio, DPI
 - Bleed (11 tests): pixel calculations, edge replication, zero bleed
-- Sharpen (8 tests): identity at zero, flat-image invariance, edge contrast, alpha preservation
+- Sharpen (16 tests): identity at zero/negative/negligible-radius, flat-image invariance, edge contrast, radius halo reach, threshold suppression vs strong-edge passthrough, achromatic (per-channel deltas equal), alpha preservation, `scaled()` shrinks radius only, `sharpen_params()` round trip
 - Color adjust (25 tests): RGB↔HSL round trip, chroma recovery, noop/empty identity, gray and near-black/near-white invariance, hue targeting and wraparound, feather bounds, alpha preservation, scope filtering (per-side activity, legacy JSON defaults to All), dropper sampling (circular mean, seam, gray, near-black noise rejection, bounds)
 - Thumbnail manager (7 tests): async loading, caching, deduplication, cache key discrimination
 - SVG export (20 tests): single/multi-page, cut marks (front pages only), bleed, sharpening, processed image directory, backs-only adjustment scoping
 - PDF export (13 tests): multi-page, real images, sharpening, sharpening + bleed, duplex end-to-end, backs-only adjustment scoping
-- Settings (5 tests): serialization, defaults, duplex backwards compatibility
+- Settings (7 tests): serialization, defaults, duplex backwards compatibility, sharpen radius/threshold backwards compatibility (absent fields default, existing amount preserved)
 - Types (various): enum behavior, defaults, validation
 
 ## Common Development Tasks
