@@ -48,13 +48,6 @@ impl PdfExporter {
         for (page_idx, page) in pages.iter().enumerate() {
             let mut ops = Vec::new();
 
-            // Draw cut marks first (background). Back pages get none: cards
-            // are cut from the front, and marks would need mirroring + the
-            // calibration offset to line up.
-            if page.side == PageSide::Front {
-                ops.extend(cut_mark_ops.clone());
-            }
-
             let is_back = page.side == PageSide::Back;
 
             // Back pages print rotated 180° when the duplex flip is about a
@@ -119,6 +112,15 @@ impl PdfExporter {
                         ..XObjectTransform::default()
                     },
                 });
+            }
+
+            // Draw cut marks last so they sit on top of the card images: with
+            // bleed on, the images cover the margins the marks live in, and the
+            // marks overlap the trim edges by design. Back pages get none:
+            // cards are cut from the front, and marks would need mirroring +
+            // the calibration offset to line up.
+            if page.side == PageSide::Front {
+                ops.extend(cut_mark_ops.clone());
             }
 
             pdf_pages.push(PdfPage::new(Mm(page_width), Mm(page_height), ops));

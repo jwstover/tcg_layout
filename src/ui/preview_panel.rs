@@ -165,22 +165,6 @@ pub fn show_preview_panel(
 
     let current_page = &pages[preview_state.current_page];
 
-    // Draw cut marks (front pages only, matching export behavior)
-    if current_page.side == PageSide::Front {
-        let cut_marks = calculate_cut_marks(layout_params, &grid);
-        for cut_mark in &cut_marks {
-            let x1 = center_x + (cut_mark.x1 * 3.0 * scale);
-            let y1 = center_y + (cut_mark.y1 * 3.0 * scale);
-            let x2 = center_x + (cut_mark.x2 * 3.0 * scale);
-            let y2 = center_y + (cut_mark.y2 * 3.0 * scale);
-
-            ui.painter().line_segment(
-                [egui::pos2(x1, y1), egui::pos2(x2, y2)],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(128, 128, 128)), // Gray cut marks
-            );
-        }
-    }
-
     // Back pages render rotated 180° when the duplex flip is about a
     // horizontal axis, matching export behavior (cards stay head-to-head)
     let rotate_180 = current_page.side == PageSide::Back && layout_params.backs_rotated_180();
@@ -256,6 +240,24 @@ pub fn show_preview_panel(
                 // Draw default placeholder
                 draw_placeholder_card(ui, card_rect, card, ui.visuals().faint_bg_color);
             }
+        }
+    }
+
+    // Draw cut marks on top of the cards (front pages only, matching export
+    // behavior): bleed images cover the margins, and the marks deliberately
+    // overlap the trim edges so perpendicular marks cross at the grid corners.
+    if current_page.side == PageSide::Front {
+        let cut_marks = calculate_cut_marks(layout_params, &grid);
+        for cut_mark in &cut_marks {
+            let x1 = center_x + (cut_mark.x1 * 3.0 * scale);
+            let y1 = center_y + (cut_mark.y1 * 3.0 * scale);
+            let x2 = center_x + (cut_mark.x2 * 3.0 * scale);
+            let y2 = center_y + (cut_mark.y2 * 3.0 * scale);
+
+            ui.painter().line_segment(
+                [egui::pos2(x1, y1), egui::pos2(x2, y2)],
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(128, 128, 128)), // Gray cut marks
+            );
         }
     }
 

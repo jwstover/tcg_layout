@@ -166,34 +166,27 @@ impl SvgExporter {
 
         main_group = main_group.add(background);
 
-        // Add cut marks (render first so they appear in background).
-        // Back pages get none: cards are cut from the front.
-        if page.side == PageSide::Front {
-            let cut_marks =
-                calculate_cut_marks(&self.params, &crate::layout::calculate_grid(&self.params));
-            for cut_mark in &cut_marks {
-                let cut_line = Line::new()
-                    .set("x1", cut_mark.x1)
-                    .set("y1", cut_mark.y1)
-                    .set("x2", cut_mark.x2)
-                    .set("y2", cut_mark.y2)
-                    .set("stroke", "#808080") // Gray color
-                    .set("stroke-width", "0.5") // Thin line
-                    .set("stroke-linecap", "round");
-
-                main_group = main_group.add(cut_line);
-            }
-        }
-
         // Back pages render rotated 180° when the duplex flip is about a
         // horizontal axis, so cut cards come out head-to-head.
         let is_back = page.side == PageSide::Back;
         let rotate_180 = is_back && self.params.backs_rotated_180();
 
-        // Add each card as an image reference (render second so they appear on top)
+        // Add each card as an image reference
         for (card, position) in &page.cards {
             let card_element = self.create_card_element(card, position, rotate_180, is_back)?;
             main_group = main_group.add(card_element);
+        }
+
+        // Add cut marks last so they render on top of the card images: with
+        // bleed on the images cover the margins the marks live in, and the marks
+        // overlap the trim edges by design. Back pages get none: cards are cut
+        // from the front.
+        if page.side == PageSide::Front {
+            let cut_marks =
+                calculate_cut_marks(&self.params, &crate::layout::calculate_grid(&self.params));
+            for cut_mark in &cut_marks {
+                main_group = main_group.add(cut_mark_line(cut_mark));
+            }
         }
 
         document = document.add(main_group);
@@ -281,34 +274,25 @@ impl SvgExporter {
 
             page_group = page_group.add(background);
 
-            // Add cut marks for this page (render first so they appear in
-            // background). Back pages get none: cards are cut from the front.
-            if page.side == PageSide::Front {
-                let cut_marks =
-                    calculate_cut_marks(&self.params, &crate::layout::calculate_grid(&self.params));
-                for cut_mark in &cut_marks {
-                    let cut_line = Line::new()
-                        .set("x1", cut_mark.x1)
-                        .set("y1", cut_mark.y1)
-                        .set("x2", cut_mark.x2)
-                        .set("y2", cut_mark.y2)
-                        .set("stroke", "#808080") // Gray color
-                        .set("stroke-width", "0.5") // Thin line
-                        .set("stroke-linecap", "round");
-
-                    page_group = page_group.add(cut_line);
-                }
-            }
-
             // Back pages render rotated 180° when the duplex flip is about a
             // horizontal axis, so cut cards come out head-to-head.
             let is_back = page.side == PageSide::Back;
             let rotate_180 = is_back && self.params.backs_rotated_180();
 
-            // Add each card as an image reference (render second so they appear on top)
+            // Add each card as an image reference
             for (card, position) in &page.cards {
                 let card_element = self.create_card_element(card, position, rotate_180, is_back)?;
                 page_group = page_group.add(card_element);
+            }
+
+            // Add cut marks last so they render on top of the card images (see
+            // create_svg_document). Back pages get none.
+            if page.side == PageSide::Front {
+                let cut_marks =
+                    calculate_cut_marks(&self.params, &crate::layout::calculate_grid(&self.params));
+                for cut_mark in &cut_marks {
+                    page_group = page_group.add(cut_mark_line(cut_mark));
+                }
             }
 
             document = document.add(page_group);
@@ -459,6 +443,18 @@ impl SvgExporter {
             PageOrientation::Landscape => (self.params.page_size.1, self.params.page_size.0),
         }
     }
+}
+
+/// Build the SVG line element for a single cut mark.
+fn cut_mark_line(cut_mark: &crate::types::CutMark) -> Line {
+    Line::new()
+        .set("x1", cut_mark.x1)
+        .set("y1", cut_mark.y1)
+        .set("x2", cut_mark.x2)
+        .set("y2", cut_mark.y2)
+        .set("stroke", "#808080") // Gray color
+        .set("stroke-width", "0.5") // Thin line
+        .set("stroke-linecap", "round")
 }
 
 /// Utility function to export a single page with default settings
@@ -978,6 +974,31 @@ mod tests {
         export_page_to_svg(&create_test_page(), &params, &front_path).unwrap();
         let front_content = std::fs::read_to_string(&front_path).unwrap();
         assert!(front_content.contains("<line"));
+    }
+
+    #[test]
+    fn test_cut_marks_render_after_images() {
+        let temp_dir = TempDir::new().unwrap();
+        let params = create_test_params();
+
+        // Single-page document: last <line> must come after the last <image>,
+        // so cut marks paint on top of the card art.
+        let single = temp_dir.path().join("single.svg");
+        export_page_to_svg(&create_test_page(), &params, &single).unwrap();
+        let content = std::fs::read_to_string(&single).unwrap();
+        assert!(
+            content.rfind("<line").unwrap() > content.rfind("<image").unwrap(),
+            "cut marks must be emitted after images in single-page SVG"
+        );
+
+        // Same for the multi-page document builder
+        let multi = temp_dir.path().join("multi.svg");
+        export_pages_to_single_svg(&[create_test_page()], &params, &multi).unwrap();
+        let content = std::fs::read_to_string(&multi).unwrap();
+        assert!(
+            content.rfind("<line").unwrap() > content.rfind("<image").unwrap(),
+            "cut marks must be emitted after images in multi-page SVG"
+        );
     }
 
     #[test]
