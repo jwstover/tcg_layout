@@ -14,7 +14,7 @@ const THUMBNAIL_HEIGHT: u32 = 200;
 pub struct ThumbnailParams {
     pub bleed_mm: f32,
     pub enable_bleed: bool,
-    pub sharpen_amount: f32,
+    pub sharpen: sharpen::SharpenParams,
     pub enable_sharpen: bool,
     pub card_size_mm: (f32, f32),
 }
@@ -24,7 +24,7 @@ impl ThumbnailParams {
         Self {
             bleed_mm: params.bleed_mm,
             enable_bleed: params.enable_bleed,
-            sharpen_amount: params.sharpen_amount,
+            sharpen: params.sharpen_params(),
             enable_sharpen: params.enable_sharpen,
             card_size_mm: params.card_size,
         }
@@ -36,7 +36,7 @@ impl Default for ThumbnailParams {
         Self {
             bleed_mm: 0.0,
             enable_bleed: false,
-            sharpen_amount: 1.0,
+            sharpen: sharpen::SharpenParams::default(),
             enable_sharpen: false,
             card_size_mm: (63.0, 88.0),
         }
@@ -57,9 +57,18 @@ pub fn generate_thumbnail(
     let mut thumbnail_rgba = thumbnail.to_rgba8();
 
     // Apply sharpening before bleed so bleed strips derive from the
-    // sharpened image (and the blurred bleed region stays smooth)
-    if params.enable_sharpen && params.sharpen_amount > 0.0 {
-        thumbnail_rgba = sharpen::apply_sharpen_to_buffer(&thumbnail_rgba, params.sharpen_amount);
+    // sharpened image (and the blurred bleed region stays smooth).
+    //
+    // The radius is specified at full resolution, so it has to be scaled down
+    // for the thumbnail or a 0.7 px sigma would sharpen roughly ten times as
+    // wide a feature here as it does on export. At thumbnail scale the scaled
+    // radius is usually negligible and `apply_sharpen_to_buffer` no-ops, which
+    // is correct: sharpening is not visible at 150 px. The full-resolution
+    // sharpen preview window is where it can actually be judged.
+    if params.enable_sharpen {
+        let scale = thumbnail_rgba.width() as f32 / img.width().max(1) as f32;
+        thumbnail_rgba =
+            sharpen::apply_sharpen_to_buffer(&thumbnail_rgba, &params.sharpen.scaled(scale));
     }
 
     // Apply bleed if enabled

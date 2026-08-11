@@ -273,7 +273,47 @@ pub fn show_parameters_panel(
                 ui.label("Sharpen Amount:");
                 ui.add(egui::DragValue::new(&mut layout_params.sharpen_amount)
                     .speed(0.05)
-                    .range(0.0..=tcg_layout::sharpen::MAX_SHARPEN_AMOUNT));
+                    .range(0.0..=tcg_layout::sharpen::MAX_SHARPEN_AMOUNT))
+                    .on_hover_text(
+                        "Strength of the unsharp mask.\n\
+                         1.0-1.6 suits 600 DPI card scans; above ~2.0 halos\n\
+                         become visible on high-contrast edges."
+                    );
+                ui.end_row();
+
+                ui.label("Sharpen Radius:");
+                ui.add(egui::DragValue::new(&mut layout_params.sharpen_radius)
+                    .speed(0.05)
+                    .range(
+                        tcg_layout::sharpen::MIN_SHARPEN_RADIUS
+                            ..=tcg_layout::sharpen::MAX_SHARPEN_RADIUS,
+                    )
+                    .suffix(" px"))
+                    .on_hover_text(
+                        "Gaussian radius of the unsharp mask, in pixels at full\n\
+                         resolution. Match it to the softness of the source:\n\
+                         ~0.7 for 600 DPI scans. Larger radii widen halos\n\
+                         without recovering more detail."
+                    );
+                ui.end_row();
+
+                ui.label("Sharpen Threshold:");
+                ui.add(egui::DragValue::new(&mut layout_params.sharpen_threshold)
+                    .speed(0.005)
+                    .range(0.0..=tcg_layout::sharpen::MAX_SHARPEN_THRESHOLD))
+                    .on_hover_text(
+                        "Local contrast below this fraction of the tonal range is\n\
+                         left alone, which keeps sharpening off flat areas and\n\
+                         out of scanner noise. 0.02 suits clean scans; raise it\n\
+                         if noise or paper texture gets crunchy."
+                    );
+                ui.end_row();
+
+                ui.label("");
+                ui.colored_label(
+                    ui.visuals().weak_text_color(),
+                    "Too small to see in the grid preview - use the full-resolution preview.",
+                );
                 ui.end_row();
 
                 ui.label("");
@@ -518,6 +558,27 @@ fn validate_params(
         validation_errors.push(format!(
             "Sharpen amount exceeds maximum ({})",
             tcg_layout::sharpen::MAX_SHARPEN_AMOUNT
+        ));
+    }
+
+    if layout_params.enable_sharpen
+        && !(tcg_layout::sharpen::MIN_SHARPEN_RADIUS..=tcg_layout::sharpen::MAX_SHARPEN_RADIUS)
+            .contains(&layout_params.sharpen_radius)
+    {
+        validation_errors.push(format!(
+            "Sharpen radius must be {}-{} px",
+            tcg_layout::sharpen::MIN_SHARPEN_RADIUS,
+            tcg_layout::sharpen::MAX_SHARPEN_RADIUS
+        ));
+    }
+
+    if layout_params.enable_sharpen
+        && !(0.0..=tcg_layout::sharpen::MAX_SHARPEN_THRESHOLD)
+            .contains(&layout_params.sharpen_threshold)
+    {
+        validation_errors.push(format!(
+            "Sharpen threshold must be 0-{}",
+            tcg_layout::sharpen::MAX_SHARPEN_THRESHOLD
         ));
     }
 

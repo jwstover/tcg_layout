@@ -248,11 +248,34 @@ mod tests {
         let mut value = serde_json::to_value(&settings).unwrap();
         let params = value["layout_params"].as_object_mut().unwrap();
         params.remove("sharpen_amount");
+        params.remove("sharpen_radius");
+        params.remove("sharpen_threshold");
         params.remove("enable_sharpen");
 
         let loaded: AppSettings = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.layout_params.sharpen_amount, 1.0);
+        assert_eq!(loaded.layout_params.sharpen_radius, 0.7);
+        assert_eq!(loaded.layout_params.sharpen_threshold, 0.02);
         assert!(!loaded.layout_params.enable_sharpen);
+    }
+
+    #[test]
+    fn test_settings_backwards_compatible_keeps_existing_sharpen_amount() {
+        // A settings file from the version that had only `sharpen_amount`
+        // should keep that amount and pick up defaults for the new knobs
+        let settings = AppSettings::default();
+        let mut value = serde_json::to_value(&settings).unwrap();
+        let params = value["layout_params"].as_object_mut().unwrap();
+        params.insert("sharpen_amount".to_string(), serde_json::json!(2.25));
+        params.insert("enable_sharpen".to_string(), serde_json::json!(true));
+        params.remove("sharpen_radius");
+        params.remove("sharpen_threshold");
+
+        let loaded: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.layout_params.sharpen_amount, 2.25);
+        assert!(loaded.layout_params.enable_sharpen);
+        assert_eq!(loaded.layout_params.sharpen_radius, 0.7);
+        assert_eq!(loaded.layout_params.sharpen_threshold, 0.02);
     }
 
     #[test]

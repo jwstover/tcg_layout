@@ -143,7 +143,7 @@ struct TcgLayoutApp {
     previous_bleed_enabled: bool,
     previous_bleed_mm: f32,
     previous_sharpen_enabled: bool,
-    previous_sharpen_amount: f32,
+    previous_sharpen: tcg_layout::sharpen::SharpenParams,
     sharpen_preview_state: SharpenPreviewState,
     color_adjust_preview_state: ColorAdjustPreviewState,
 }
@@ -209,7 +209,7 @@ impl Default for TcgLayoutApp {
             previous_bleed_enabled: saved_settings.layout_params.enable_bleed,
             previous_bleed_mm: saved_settings.layout_params.bleed_mm,
             previous_sharpen_enabled: saved_settings.layout_params.enable_sharpen,
-            previous_sharpen_amount: saved_settings.layout_params.sharpen_amount,
+            previous_sharpen: saved_settings.layout_params.sharpen_params(),
             sharpen_preview_state: SharpenPreviewState::default(),
             color_adjust_preview_state: ColorAdjustPreviewState::default(),
         }
@@ -1205,7 +1205,7 @@ impl eframe::App for TcgLayoutApp {
         if sharpen_preview_requested {
             if let Some(card) = self.selected_cards.first() {
                 self.sharpen_preview_state
-                    .open(card.path.clone(), self.layout_params.sharpen_amount);
+                    .open(card.path.clone(), self.layout_params.sharpen_params());
             }
         }
 
@@ -1213,8 +1213,10 @@ impl eframe::App for TcgLayoutApp {
         if self.sharpen_preview_state.is_open() {
             match sharpen_preview::show_sharpen_preview_window(ctx, &mut self.sharpen_preview_state)
             {
-                SharpenPreviewAction::Apply(amount) => {
-                    self.layout_params.sharpen_amount = amount;
+                SharpenPreviewAction::Apply(sharpen) => {
+                    self.layout_params.sharpen_amount = sharpen.amount;
+                    self.layout_params.sharpen_radius = sharpen.radius;
+                    self.layout_params.sharpen_threshold = sharpen.threshold;
                     self.layout_params.enable_sharpen = true;
                     self.save_settings();
                     // Thumbnail refresh is handled by the change detection below
@@ -1252,7 +1254,7 @@ impl eframe::App for TcgLayoutApp {
         let thumbnails_outdated = self.layout_params.enable_bleed != self.previous_bleed_enabled
             || (self.layout_params.bleed_mm - self.previous_bleed_mm).abs() > 0.01
             || self.layout_params.enable_sharpen != self.previous_sharpen_enabled
-            || (self.layout_params.sharpen_amount - self.previous_sharpen_amount).abs() > 0.001;
+            || self.layout_params.sharpen_params() != self.previous_sharpen;
 
         if thumbnails_outdated {
             // Clear texture cache to force regeneration of preview textures
@@ -1282,7 +1284,7 @@ impl eframe::App for TcgLayoutApp {
             self.previous_bleed_enabled = self.layout_params.enable_bleed;
             self.previous_bleed_mm = self.layout_params.bleed_mm;
             self.previous_sharpen_enabled = self.layout_params.enable_sharpen;
-            self.previous_sharpen_amount = self.layout_params.sharpen_amount;
+            self.previous_sharpen = self.layout_params.sharpen_params();
         }
 
         // Register thumbnail-managed Cards for any newly referenced back images

@@ -78,6 +78,10 @@ pub struct LayoutParams {
     pub enable_bleed: bool, // Whether bleed is enabled
     #[serde(default = "default_sharpen_amount")]
     pub sharpen_amount: f32, // Unsharp mask strength
+    #[serde(default = "default_sharpen_radius")]
+    pub sharpen_radius: f32, // Unsharp mask radius (Gaussian sigma in px at full resolution)
+    #[serde(default = "default_sharpen_threshold")]
+    pub sharpen_threshold: f32, // Local contrast below this fraction is left alone
     #[serde(default)]
     pub enable_sharpen: bool, // Whether sharpening is enabled
     pub center_layout: bool, // Whether to center the layout on the page
@@ -99,6 +103,19 @@ fn default_sharpen_amount() -> f32 {
     1.0
 }
 
+/// Tuned on 600 DPI card scans, whose measured scanner blur is a Gaussian of
+/// sigma ~0.9 px. Radii much above this start to show halos on high-contrast
+/// edges without recovering any more detail.
+fn default_sharpen_radius() -> f32 {
+    0.7
+}
+
+/// Just above the ~2/255 noise floor measured on the scans, so sharpening
+/// stays off flat areas.
+fn default_sharpen_threshold() -> f32 {
+    0.02
+}
+
 impl Default for LayoutParams {
     fn default() -> Self {
         Self {
@@ -109,9 +126,11 @@ impl Default for LayoutParams {
             orientation: FillOrder::RowMajor,
             page_orientation: PageOrientation::Portrait,
             target_dpi: 300,
-            bleed_mm: 3.0,         // Standard print bleed
-            enable_bleed: false,   // Disabled by default
-            sharpen_amount: 1.0,   // Moderate sharpening when enabled
+            bleed_mm: 3.0,       // Standard print bleed
+            enable_bleed: false, // Disabled by default
+            sharpen_amount: 1.0, // Moderate sharpening when enabled
+            sharpen_radius: default_sharpen_radius(),
+            sharpen_threshold: default_sharpen_threshold(),
             enable_sharpen: false, // Disabled by default
             center_layout: false,  // Disabled by default
             hsl_adjustments: Vec::new(),
@@ -125,6 +144,19 @@ impl Default for LayoutParams {
 }
 
 impl LayoutParams {
+    /// The unsharp mask settings as a single value.
+    ///
+    /// Spelled with the absolute `tcg_layout::` path because this module is
+    /// compiled into both the lib and bin trees, while `sharpen` only ever
+    /// lives in the lib.
+    pub fn sharpen_params(&self) -> tcg_layout::sharpen::SharpenParams {
+        tcg_layout::sharpen::SharpenParams::new(
+            self.sharpen_amount,
+            self.sharpen_radius,
+            self.sharpen_threshold,
+        )
+    }
+
     /// Page dimensions honoring the page orientation (width, height) in mm
     pub fn effective_page_size(&self) -> (f32, f32) {
         match self.page_orientation {
@@ -446,6 +478,8 @@ mod tests {
             bleed_mm: 0.0,
             enable_bleed: false,
             sharpen_amount: 1.0,
+            sharpen_radius: 0.7,
+            sharpen_threshold: 0.02,
             enable_sharpen: false,
             center_layout: false,
             hsl_adjustments: Vec::new(),

@@ -15,6 +15,8 @@ pub struct CacheKey {
     bleed_mm_rounded: u32, // Rounded to avoid float comparison issues
     sharpen_enabled: bool,
     sharpen_amount_rounded: u32, // Rounded to avoid float comparison issues
+    sharpen_radius_rounded: u32, // Rounded to avoid float comparison issues
+    sharpen_threshold_rounded: u32, // Rounded to avoid float comparison issues
 }
 
 impl CacheKey {
@@ -27,7 +29,9 @@ impl CacheKey {
             bleed_enabled: params.enable_bleed,
             bleed_mm_rounded: (params.bleed_mm * 10.0).round() as u32, // Store as tenths of mm
             sharpen_enabled: params.enable_sharpen,
-            sharpen_amount_rounded: (params.sharpen_amount * 100.0).round() as u32, // Hundredths
+            sharpen_amount_rounded: (params.sharpen.amount * 100.0).round() as u32, // Hundredths
+            sharpen_radius_rounded: (params.sharpen.radius * 100.0).round() as u32, // Hundredths
+            sharpen_threshold_rounded: (params.sharpen.threshold * 1000.0).round() as u32, // Thousandths
         })
     }
 
@@ -355,7 +359,7 @@ mod tests {
 
         // Different sharpen settings should create different keys
         let sharpen_params = ThumbnailParams {
-            sharpen_amount: 1.5,
+            sharpen: tcg_layout::sharpen::SharpenParams::new(1.5, 0.7, 0.02),
             enable_sharpen: true,
             ..ThumbnailParams::default()
         };
@@ -365,13 +369,33 @@ mod tests {
 
         // Different sharpen amounts should create different keys
         let stronger_sharpen = ThumbnailParams {
-            sharpen_amount: 2.5,
+            sharpen: tcg_layout::sharpen::SharpenParams::new(2.5, 0.7, 0.02),
             enable_sharpen: true,
             ..ThumbnailParams::default()
         };
         let key5 = CacheKey::new(path.clone(), &stronger_sharpen);
         assert!(key5.is_some());
         assert_ne!(key4, key5);
+
+        // Radius and threshold are part of the key too: same amount, different
+        // radius must not reuse a cached thumbnail
+        let wider_radius = ThumbnailParams {
+            sharpen: tcg_layout::sharpen::SharpenParams::new(2.5, 1.4, 0.02),
+            enable_sharpen: true,
+            ..ThumbnailParams::default()
+        };
+        let key6 = CacheKey::new(path.clone(), &wider_radius);
+        assert!(key6.is_some());
+        assert_ne!(key5, key6);
+
+        let higher_threshold = ThumbnailParams {
+            sharpen: tcg_layout::sharpen::SharpenParams::new(2.5, 1.4, 0.05),
+            enable_sharpen: true,
+            ..ThumbnailParams::default()
+        };
+        let key7 = CacheKey::new(path.clone(), &higher_threshold);
+        assert!(key7.is_some());
+        assert_ne!(key6, key7);
 
         // Test nonexistent file
         let nonexistent = PathBuf::from("/nonexistent/file.jpg");

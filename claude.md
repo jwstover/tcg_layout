@@ -15,7 +15,7 @@ Desktop application that automatically lays out Trading Card Game (TCG) card ima
 
 ### Build Commands
 - `cargo run --bin tcg_layout` - Run the application
-- `cargo test` - Run all tests (~260 test executions; shared modules run in both the lib and bin trees)
+- `cargo test` - Run all tests (~290 test executions; shared modules run in both the lib and bin trees)
 - `cargo clippy` - Run linter checks
 - `cargo fmt` - Format code
 
@@ -48,7 +48,7 @@ src/
   image_processing.rs  - Thumbnail generation, DPI extraction from EXIF
   image.rs             - Image metadata, format detection, card type detection by aspect ratio
   bleed.rs             - Bleed edge extension using Gaussian blur on edges/corners
-  sharpen.rs           - Unsharp mask sharpening with adjustable amount
+  sharpen.rs           - Luminance-only unsharp mask (amount, radius, threshold)
   color_adjust.rs      - Targeted HSL adjustments (hue band + feather + chroma gating, front/back scope) and dropper color sampling
   thumbnail_manager.rs - Async thumbnail loading with LRU cache and file mod-time tracking
   svg_export.rs        - SVG export with cut marks, bleed/sharpen processing, multi-page Inkscape layers
@@ -85,6 +85,8 @@ struct LayoutParams {
     bleed_mm: f32,                   // Bleed amount in mm
     enable_bleed: bool,              // Whether bleed is active
     sharpen_amount: f32,             // Unsharp mask strength (0.0-3.0, serde default 1.0)
+    sharpen_radius: f32,             // Unsharp mask Gaussian sigma in px at full res (0.1-3.0, serde default 0.7)
+    sharpen_threshold: f32,          // Local contrast below this fraction is left alone (0.0-0.2, serde default 0.02)
     enable_sharpen: bool,            // Whether sharpening is active (serde default false)
     center_layout: bool,             // Center cards on page (ignores margins)
     hsl_adjustments: Vec<HslAdjustment>, // Targeted color adjustments (serde default empty)
@@ -184,10 +186,15 @@ struct PageLayout {
 
 **3b. Sharpening System** (`sharpen.rs`)
 - Unsharp mask: `result = original + amount * (original - blur(original, sigma))`
-- `apply_sharpen_to_buffer()` for RGBA buffers (thumbnails, preview), `apply_sharpen()` for DynamicImage (export)
+- `SharpenParams { amount, radius, threshold }` bundles the three knobs; built via `LayoutParams::sharpen_params()` (which lives in `types.rs` and uses the absolute `tcg_layout::sharpen` path, because `types` compiles into both the lib and bin trees while `sharpen` only exists in the lib)
+- `apply_sharpen_to_buffer()` for RGBA buffers (thumbnails, preview), `apply_sharpen()` for DynamicImage (export). Both take `&SharpenParams`
+- **Luminance-only**: the correction is computed from Rec. 601 luma and added equally to R, G and B. Sharpening channels independently shifts hue along coloured edges (red/cyan fringing on card art)
+- `threshold` skips pixels whose local contrast is below the given fraction of the tonal range, keeping sharpening off flat areas and out of scanner noise
+- `radius` is a Gaussian sigma **in pixels at the resolution being processed**. `SharpenParams::scaled(factor)` shrinks it for a resized copy; `generate_thumbnail()` applies this so a full-res radius is not ~10x too wide on a 150px thumbnail. At thumbnail scale the scaled radius is usually below `NEGLIGIBLE_RADIUS` and sharpening no-ops, which is correct - it is not visible at 150px, so the full-resolution preview window is the only place to judge it
+- `is_active()` gates on both amount and radius; exporters call it via `sharpen_active()`
 - `MAX_SHARPEN_AMOUNT` (3.0) bounds the UI slider and validation
 - Order of operations everywhere: **sharpen first, then bleed** (so bleed strips derive from the sharpened image)
-- Full-resolution preview window (`ui/sharpen_preview.rs`): loads first card capped at 2048px, re-sharpens async on slider change (one task in flight, latest amount wins), hold-to-compare with original, zoom, "Apply to all cards" commits the amount to `layout_params`
+- Full-resolution preview window (`ui/sharpen_preview.rs`): loads first card capped at 2048px, re-sharpens async on any slider change (amount / radius / threshold; one task in flight, latest settings win), hold-to-compare with original, zoom, "Apply to all cards" commits all three values to `layout_params`
 
 **4. Image Processing** (`image_processing.rs` + `image.rs`)
 - `generate_thumbnail()` - Creates RGBA8 thumbnail preserving aspect ratio
@@ -219,7 +226,7 @@ struct PageLayout {
 - Three-panel layout: Left (card list + decklist), Center (preview), Right (parameters)
 - Polls for async messages each frame: thumbnail results, AI matching results
 - Bleed or sharpen setting changes trigger texture cache clear and full thumbnail re-request
-- Sharpen preview window state (`SharpenPreviewState`) lives on `TcgLayoutApp`; "Apply to all cards" sets `layout_params.sharpen_amount` + `enable_sharpen` and saves settings
+- Sharpen preview window state (`SharpenPreviewState`) lives on `TcgLayoutApp`; "Apply to all cards" sets `sharpen_amount` / `sharpen_radius` / `sharpen_threshold` + `enable_sharpen` and saves settings
 - Custom dark theme defined in `style.rs`
 
 ### Application State Flow
@@ -249,7 +256,7 @@ struct PageLayout {
 - SVG export with image references, cut marks, bleed, sharpening, multi-page Inkscape layers
 - PDF export with image deduplication, DPI scaling, bleed, sharpening, cut marks
 - Bleed system with Gaussian blur edge extension
-- Sharpening (unsharp mask) with adjustable amount and full-resolution single-card preview window
+- Sharpening: luminance-only unsharp mask with adjustable amount, radius and threshold, plus a full-resolution single-card preview window
 - Targeted HSL color adjustments with dropper sampling, per-adjustment front/back scope, and full-resolution editor window that cycles through all fronts and backs (export-only; not in thumbnails)
 - Cut marks generation
 - Layout centering (ignores margins, centers grid on page)
@@ -272,7 +279,7 @@ struct PageLayout {
 
 ### Test Structure
 - Unit tests colocated in each module using `#[cfg(test)]`
-- ~260 test executions total (shared modules compile into both lib and bin trees)
+- ~290 test executions total (shared modules compile into both lib and bin trees)
 - Async tests in `thumbnail_manager.rs` use tokio runtime
 
 ### Running Tests
@@ -354,7 +361,7 @@ cargo test settings           # Settings persistence tests
 
 ### Thumbnail Cache Invalidation
 - Cache keys include file modification time, so editing an image file on disk automatically invalidates its cache entry
-- Bleed settings (enabled + mm amount) and sharpen settings (enabled + amount) are part of the cache key - changing either triggers full cache miss
+- Bleed settings (enabled + mm amount) and sharpen settings (enabled + amount + radius + threshold) are part of the cache key - changing either triggers full cache miss
 - The app clears the texture cache and re-requests thumbnails when bleed or sharpen settings change (`thumbnails_outdated` check in `main.rs`)
 
 ### Image Deduplication in PDF Export

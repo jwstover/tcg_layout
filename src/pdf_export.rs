@@ -195,7 +195,7 @@ impl PdfExporter {
     }
 
     fn sharpen_active(&self) -> bool {
-        self.params.enable_sharpen && self.params.sharpen_amount > 0.0
+        self.params.enable_sharpen && self.params.sharpen_params().is_active()
     }
 
     fn color_adjust_active_for(&self, is_back: bool) -> bool {
@@ -246,7 +246,7 @@ impl PdfExporter {
         }
 
         if self.sharpen_active() {
-            img = sharpen::apply_sharpen(&img, self.params.sharpen_amount);
+            img = sharpen::apply_sharpen(&img, &self.params.sharpen_params());
         }
 
         let (card_width, card_height, offset_x, offset_y) = if self.bleed_active() {
@@ -336,6 +336,8 @@ mod tests {
             bleed_mm: 0.0,
             enable_bleed: false,
             sharpen_amount: 1.0,
+            sharpen_radius: 0.7,
+            sharpen_threshold: 0.02,
             enable_sharpen: false,
             center_layout: false,
             hsl_adjustments: Vec::new(),
@@ -444,6 +446,8 @@ mod tests {
 
         let params = LayoutParams {
             sharpen_amount: 1.5,
+            sharpen_radius: 0.7,
+            sharpen_threshold: 0.02,
             enable_sharpen: true,
             ..create_test_params()
         };
@@ -473,6 +477,8 @@ mod tests {
             bleed_mm: 2.0,
             enable_bleed: true,
             sharpen_amount: 1.0,
+            sharpen_radius: 0.7,
+            sharpen_threshold: 0.02,
             enable_sharpen: true,
             ..create_test_params()
         };

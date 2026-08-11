@@ -19,7 +19,7 @@ enum SharpenPreviewMessage {
         error: String,
     },
     Sharpened {
-        amount: f32,
+        params: sharpen::SharpenParams,
         image: ImageBuffer<Rgba<u8>, Vec<u8>>,
     },
 }
@@ -27,8 +27,8 @@ enum SharpenPreviewMessage {
 /// Result of showing the sharpen preview window for one frame
 pub enum SharpenPreviewAction {
     None,
-    /// User clicked "Apply to all cards" with this sharpen amount
-    Apply(f32),
+    /// User clicked "Apply to all cards" with these sharpen settings
+    Apply(sharpen::SharpenParams),
 }
 
 /// State for the full-resolution sharpen preview window.
@@ -41,12 +41,12 @@ pub enum SharpenPreviewAction {
 pub struct SharpenPreviewState {
     open: bool,
     card_path: Option<PathBuf>,
-    pub pending_amount: f32,
+    pub pending: sharpen::SharpenParams,
     original: Option<Arc<ImageBuffer<Rgba<u8>, Vec<u8>>>>,
     original_texture: Option<egui::TextureHandle>,
     sharpened_texture: Option<egui::TextureHandle>,
-    /// Amount of the currently displayed sharpened texture
-    displayed_amount: Option<f32>,
+    /// Settings the currently displayed sharpened texture was built with
+    displayed: Option<sharpen::SharpenParams>,
     sharpen_in_flight: bool,
     is_loading: bool,
     error: Option<String>,
@@ -61,11 +61,11 @@ impl SharpenPreviewState {
     }
 
     /// Open the preview window for a card and start loading its image
-    pub fn open(&mut self, card_path: PathBuf, initial_amount: f32) {
+    pub fn open(&mut self, card_path: PathBuf, initial: sharpen::SharpenParams) {
         *self = Self {
             open: true,
             card_path: Some(card_path.clone()),
-            pending_amount: initial_amount,
+            pending: initial,
             zoom: 1.0,
             is_loading: true,
             ..Self::default()
@@ -105,15 +105,13 @@ impl SharpenPreviewState {
     }
 
     fn has_pending_work(&self) -> bool {
-        self.is_loading
-            || self.sharpen_in_flight
-            || self.displayed_amount != Some(self.pending_amount)
+        self.is_loading || self.sharpen_in_flight || self.displayed != Some(self.pending)
     }
 
     /// Kick off a background sharpen pass for the current pending amount,
     /// unless one is already running or the result is already displayed
     fn request_sharpen_if_needed(&mut self) {
-        if self.sharpen_in_flight || self.displayed_amount == Some(self.pending_amount) {
+        if self.sharpen_in_flight || self.displayed == Some(self.pending) {
             return;
         }
 
@@ -121,12 +119,12 @@ impl SharpenPreviewState {
             return;
         };
 
-        let amount = self.pending_amount;
+        let params = self.pending;
         self.sharpen_in_flight = true;
 
         tokio::task::spawn_blocking(move || {
-            let image = sharpen::apply_sharpen_to_buffer(&original, amount);
-            let _ = sender.send(SharpenPreviewMessage::Sharpened { amount, image });
+            let image = sharpen::apply_sharpen_to_buffer(&original, &params);
+            let _ = sender.send(SharpenPreviewMessage::Sharpened { params, image });
         });
     }
 
@@ -153,11 +151,11 @@ impl SharpenPreviewState {
                     self.is_loading = false;
                     self.error = Some(error);
                 }
-                SharpenPreviewMessage::Sharpened { amount, image } => {
+                SharpenPreviewMessage::Sharpened { params, image } => {
                     self.sharpen_in_flight = false;
                     self.sharpened_texture =
                         Some(load_texture(ctx, "sharpen_preview_sharpened", &image));
-                    self.displayed_amount = Some(amount);
+                    self.displayed = Some(params);
                     // Slider may have moved while this pass was running
                     self.request_sharpen_if_needed();
                 }
@@ -212,8 +210,27 @@ pub fn show_sharpen_preview_window(
             ui.horizontal(|ui| {
                 ui.label("Amount:");
                 ui.add(
-                    egui::Slider::new(&mut state.pending_amount, 0.0..=sharpen::MAX_SHARPEN_AMOUNT)
+                    egui::Slider::new(&mut state.pending.amount, 0.0..=sharpen::MAX_SHARPEN_AMOUNT)
                         .fixed_decimals(2),
+                );
+
+                ui.label("Radius:");
+                ui.add(
+                    egui::Slider::new(
+                        &mut state.pending.radius,
+                        sharpen::MIN_SHARPEN_RADIUS..=sharpen::MAX_SHARPEN_RADIUS,
+                    )
+                    .fixed_decimals(2)
+                    .suffix(" px"),
+                );
+
+                ui.label("Threshold:");
+                ui.add(
+                    egui::Slider::new(
+                        &mut state.pending.threshold,
+                        0.0..=sharpen::MAX_SHARPEN_THRESHOLD,
+                    )
+                    .fixed_decimals(3),
                 );
 
                 ui.separator();
@@ -238,15 +255,16 @@ pub fn show_sharpen_preview_window(
                 if state.is_loading {
                     ui.spinner();
                     ui.label("Loading full-resolution image...");
-                } else if state.sharpen_in_flight
-                    || state.displayed_amount != Some(state.pending_amount)
-                {
+                } else if state.sharpen_in_flight || state.displayed != Some(state.pending) {
                     ui.spinner();
                     ui.label("Sharpening...");
                 } else if compare_held {
                     ui.label("Showing original");
-                } else if let Some(amount) = state.displayed_amount {
-                    ui.label(format!("Showing sharpened (amount {amount:.2})"));
+                } else if let Some(shown) = state.displayed {
+                    ui.label(format!(
+                        "Showing sharpened (amount {:.2}, radius {:.2} px, threshold {:.3})",
+                        shown.amount, shown.radius, shown.threshold
+                    ));
                 }
             });
 
@@ -290,7 +308,7 @@ pub fn show_sharpen_preview_window(
                     .add_enabled(apply_enabled, egui::Button::new("Apply to all cards"))
                     .clicked()
                 {
-                    action = SharpenPreviewAction::Apply(state.pending_amount);
+                    action = SharpenPreviewAction::Apply(state.pending);
                     close_requested = true;
                 }
                 if ui.button("Cancel").clicked() {
