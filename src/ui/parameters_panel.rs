@@ -2,6 +2,11 @@ use super::{CardSizeOption, PageSizeOption};
 use crate::types::{FillOrder, FlipEdge, LayoutParams, PageOrientation};
 use eframe::egui;
 
+/// Upper bound on a single printer margin. Real forced margins are a few
+/// millimetres; this leaves headroom for oddities without letting a slip
+/// collapse the printable area.
+const MAX_PRINTER_MARGIN_MM: f32 = 30.0;
+
 #[allow(clippy::too_many_arguments)]
 pub fn show_parameters_panel(
     ui: &mut egui::Ui,
@@ -181,6 +186,73 @@ pub fn show_parameters_panel(
                 }
             });
             ui.end_row();
+
+            // Printer margins section: the unprintable border the printer
+            // forces, which the layout keeps clear and the export pages match.
+            ui.horizontal(|ui| {
+                ui.label("Printer Margins:");
+                ui.colored_label(ui.visuals().weak_text_color(), "(?)").on_hover_text(
+                    "The border your printer physically cannot print on.\n\
+                     Enter it from the printer's specs, or measure a test print.\n\n\
+                     Exported pages are then sized to the printable area instead\n\
+                     of the whole sheet, so the driver no longer has to shrink or\n\
+                     shift the page to fit it: cards print at exact size and stay\n\
+                     aligned on the paper. Cards and cut marks are also kept out\n\
+                     of the border, so no mark gets clipped."
+                );
+            });
+            ui.checkbox(&mut layout_params.enable_printer_margins, "Printer has forced margins");
+            ui.end_row();
+
+            if layout_params.enable_printer_margins {
+                ui.label("Unprintable (mm):");
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Top:");
+                        ui.add(egui::DragValue::new(&mut layout_params.printer_margins.top)
+                            .speed(0.1)
+                            .range(0.0..=MAX_PRINTER_MARGIN_MM)
+                            .suffix(" mm"));
+                        ui.label("Right:");
+                        ui.add(egui::DragValue::new(&mut layout_params.printer_margins.right)
+                            .speed(0.1)
+                            .range(0.0..=MAX_PRINTER_MARGIN_MM)
+                            .suffix(" mm"));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Bottom:");
+                        ui.add(egui::DragValue::new(&mut layout_params.printer_margins.bottom)
+                            .speed(0.1)
+                            .range(0.0..=MAX_PRINTER_MARGIN_MM)
+                            .suffix(" mm"));
+                        ui.label("Left:");
+                        ui.add(egui::DragValue::new(&mut layout_params.printer_margins.left)
+                            .speed(0.1)
+                            .range(0.0..=MAX_PRINTER_MARGIN_MM)
+                            .suffix(" mm"));
+                    });
+                });
+                ui.end_row();
+
+                let (sheet_w, sheet_h) = layout_params.effective_page_size();
+                let (printable_w, printable_h) = layout_params.printable_size();
+                ui.label("");
+                ui.vertical(|ui| {
+                    ui.colored_label(
+                        ui.visuals().weak_text_color(),
+                        format!(
+                            "Export page: {printable_w:.1} × {printable_h:.1} mm \
+                             (printable area of {sheet_w:.0} × {sheet_h:.0})"
+                        ),
+                    );
+                    ui.colored_label(
+                        ui.visuals().weak_text_color(),
+                        "Print at 100% / \"Actual size\"; \"Fit to printable area\"\n\
+                         now scales by 1.0, so either setting is correct.",
+                    );
+                });
+                ui.end_row();
+            }
 
             ui.label("Spacing (mm):");
             ui.horizontal(|ui| {
@@ -580,6 +652,30 @@ fn validate_params(
             "Sharpen threshold must be 0-{}",
             tcg_layout::sharpen::MAX_SHARPEN_THRESHOLD
         ));
+    }
+
+    if layout_params.enable_printer_margins {
+        let printer = layout_params.printer_margins;
+        if printer.top < 0.0 || printer.right < 0.0 || printer.bottom < 0.0 || printer.left < 0.0 {
+            validation_errors.push("Printer margins cannot be negative".to_string());
+        }
+
+        let (sheet_width, sheet_height) = layout_params.effective_page_size();
+        if printer.left + printer.right >= sheet_width
+            || printer.top + printer.bottom >= sheet_height
+        {
+            validation_errors
+                .push("Printer margins leave no printable area on the page".to_string());
+        }
+
+        let (printable_width, printable_height) = layout_params.printable_size();
+        if layout_params.card_size.0 > printable_width
+            || layout_params.card_size.1 > printable_height
+        {
+            validation_errors.push(
+                "Card is larger than the printable area left by the printer margins".to_string(),
+            );
+        }
     }
 
     if layout_params.enable_duplex

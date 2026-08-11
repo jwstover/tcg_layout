@@ -1,26 +1,27 @@
 use crate::types::{
     Card, CardPosition, CutMark, CutMarkType, FillOrder, GridLayout, LayoutParams, PageLayout,
-    PageOrientation, PageSide,
+    PageSide,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub fn calculate_grid(params: &LayoutParams) -> GridLayout {
     // Get effective page dimensions based on orientation
-    let (page_width, page_height) = match params.page_orientation {
-        PageOrientation::Portrait => params.page_size,
-        PageOrientation::Landscape => (params.page_size.1, params.page_size.0), // Swap width and height
-    };
+    let (page_width, page_height) = params.effective_page_size();
+
+    // The printer's unprintable border is a floor on the margins either way:
+    // a card laid out there would be clipped off the print.
+    let printer = params.layout_printer_margins();
 
     // When centering, ignore margins for grid calculation to maximize space
     let (margin_left, margin_right, margin_top, margin_bottom) = if params.center_layout {
-        (0.0, 0.0, 0.0, 0.0)
+        (printer.left, printer.right, printer.top, printer.bottom)
     } else {
         (
-            params.margins.left,
-            params.margins.right,
-            params.margins.top,
-            params.margins.bottom,
+            params.margins.left.max(printer.left),
+            params.margins.right.max(printer.right),
+            params.margins.top.max(printer.top),
+            params.margins.bottom.max(printer.bottom),
         )
     };
 
@@ -251,10 +252,16 @@ pub fn calculate_cut_marks(params: &LayoutParams, grid: &GridLayout) -> Vec<CutM
     let mut cut_marks = Vec::new();
 
     // Get effective page dimensions based on orientation
-    let (page_width, page_height) = match params.page_orientation {
-        PageOrientation::Portrait => params.page_size,
-        PageOrientation::Landscape => (params.page_size.1, params.page_size.0),
-    };
+    let (page_width, page_height) = params.effective_page_size();
+
+    // Marks run out as far as the printer can actually put ink: the sheet edge,
+    // or the printable area's edge when the printer forces margins. Running
+    // them into an unprintable border would just clip the mark short of the
+    // page edge anyway, and on an off-center printable area it would clip
+    // asymmetrically.
+    let printer = params.effective_printer_margins();
+    let (min_x, min_y) = (printer.left, printer.top);
+    let (max_x, max_y) = (page_width - printer.right, page_height - printer.bottom);
 
     // Use effective margins for cut mark positioning
     let effective_margins = params.effective_margins(grid);
@@ -288,10 +295,10 @@ pub fn calculate_cut_marks(params: &LayoutParams, grid: &GridLayout) -> Vec<CutM
         for (i, &y) in y_lines.iter().enumerate() {
             cut_marks.push(CutMark {
                 x1: x,
-                y1: if i == 0 { 0.0 } else { y - overlap_y },
+                y1: if i == 0 { min_y } else { y - overlap_y },
                 x2: x,
                 y2: if i == y_lines.len() - 1 {
-                    page_height
+                    max_y
                 } else {
                     y + overlap_y
                 },
@@ -304,10 +311,10 @@ pub fn calculate_cut_marks(params: &LayoutParams, grid: &GridLayout) -> Vec<CutM
     for &y in &y_lines {
         for (i, &x) in x_lines.iter().enumerate() {
             cut_marks.push(CutMark {
-                x1: if i == 0 { 0.0 } else { x - overlap_x },
+                x1: if i == 0 { min_x } else { x - overlap_x },
                 y1: y,
                 x2: if i == x_lines.len() - 1 {
-                    page_width
+                    max_x
                 } else {
                     x + overlap_x
                 },
@@ -1114,5 +1121,148 @@ mod tests {
             .find(|m| m.mark_type == CutMarkType::Horizontal && m.x1 == 0.0)
             .expect("horizontal mark from left of page");
         assert_eq!(left_mark.x2, 10.0 + 1.0);
+    }
+
+    /// A4 with typical inkjet forced margins: a larger bottom edge where the
+    /// feed grips the sheet.
+    fn printer_margin_params() -> LayoutParams {
+        LayoutParams {
+            page_size: (210.0, 297.0),
+            card_size: (63.0, 88.0),
+            margins: Margins::uniform(5.0),
+            spacing: (0.0, 0.0),
+            page_orientation: PageOrientation::Portrait,
+            enable_printer_margins: true,
+            printer_margins: Margins {
+                top: 3.0,
+                right: 3.0,
+                bottom: 15.0,
+                left: 3.0,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_grid_unaffected_when_user_margins_exceed_printer_margins() {
+        // 10mm all round clears the printer's 3mm sides, so only the 15mm
+        // bottom can bite - and here it doesn't change the row count
+        let base = LayoutParams {
+            margins: Margins::uniform(10.0),
+            ..printer_margin_params()
+        };
+        let without = LayoutParams {
+            enable_printer_margins: false,
+            ..base.clone()
+        };
+
+        let with_printer = calculate_grid(&base);
+        let no_printer = calculate_grid(&without);
+        assert_eq!(with_printer.rows, no_printer.rows);
+        assert_eq!(with_printer.cols, no_printer.cols);
+    }
+
+    #[test]
+    fn test_grid_shrinks_when_printer_margins_exceed_user_margins() {
+        // 5mm user margins vs a 15mm printer bottom: usable height drops from
+        // 297 - 10 = 287mm (3 rows of 88) to 297 - 5 - 15 = 277mm (3 rows still
+        // fit at 264mm, so widen the card to force the row out)
+        let params = LayoutParams {
+            card_size: (63.0, 95.0),
+            ..printer_margin_params()
+        };
+        let without = LayoutParams {
+            enable_printer_margins: false,
+            ..params.clone()
+        };
+
+        // 297 - 10 = 287 fits 3 rows of 95 (285mm)
+        assert_eq!(calculate_grid(&without).rows, 3);
+        // 297 - 5 - 15 = 277 fits only 2
+        assert_eq!(calculate_grid(&params).rows, 2);
+    }
+
+    #[test]
+    fn test_cards_stay_clear_of_unprintable_border() {
+        let params = printer_margin_params();
+        let grid = calculate_grid(&params);
+        let printer = params.effective_printer_margins();
+        let (page_width, page_height) = params.effective_page_size();
+
+        for position in generate_positions(&params, &grid) {
+            assert!(position.x >= printer.left);
+            assert!(position.y >= printer.top);
+            assert!(position.x + params.card_size.0 <= page_width - printer.right);
+            assert!(position.y + params.card_size.1 <= page_height - printer.bottom);
+        }
+    }
+
+    #[test]
+    fn test_cut_marks_stop_at_printable_bounds() {
+        let params = printer_margin_params();
+        let grid = calculate_grid(&params);
+        let printer = params.effective_printer_margins();
+        let (page_width, page_height) = params.effective_page_size();
+
+        let marks = calculate_cut_marks(&params, &grid);
+        assert!(!marks.is_empty());
+
+        for mark in &marks {
+            for x in [mark.x1, mark.x2] {
+                assert!(x >= printer.left - f32::EPSILON, "mark x {x} left of band");
+                assert!(x <= page_width - printer.right + f32::EPSILON);
+            }
+            for y in [mark.y1, mark.y2] {
+                assert!(y >= printer.top - f32::EPSILON, "mark y {y} above band");
+                assert!(y <= page_height - printer.bottom + f32::EPSILON);
+            }
+        }
+
+        // The outermost marks still run all the way out, now to the printable
+        // edge rather than the sheet edge
+        assert!(marks
+            .iter()
+            .any(|m| m.mark_type == CutMarkType::Vertical && m.y1 == printer.top));
+        assert!(marks
+            .iter()
+            .any(|m| m.mark_type == CutMarkType::Vertical && m.y2 == page_height - printer.bottom));
+        assert!(marks
+            .iter()
+            .any(|m| m.mark_type == CutMarkType::Horizontal && m.x1 == printer.left));
+        assert!(marks
+            .iter()
+            .any(|m| m.mark_type == CutMarkType::Horizontal && m.x2 == page_width - printer.right));
+    }
+
+    #[test]
+    fn test_duplex_back_positions_stay_inside_printable_area() {
+        // Short-edge flip on a portrait page mirrors y, so the asymmetric
+        // top/bottom printer margins are what the mirror has to survive
+        let params = LayoutParams {
+            enable_duplex: true,
+            flip_edge: FlipEdge::ShortEdge,
+            ..printer_margin_params()
+        };
+        let grid = calculate_grid(&params);
+        let printer = params.effective_printer_margins();
+        let (_, page_height) = params.effective_page_size();
+
+        assert!(!params.back_mirror_is_horizontal());
+
+        for position in generate_positions(&params, &grid) {
+            let back = mirror_position_for_back(&position, &params);
+            assert!(
+                back.y >= printer.top,
+                "back at y {} is inside the {}mm top border",
+                back.y,
+                printer.top
+            );
+            assert!(
+                back.y + params.card_size.1 <= page_height - printer.bottom,
+                "back at y {} overruns the {}mm bottom border",
+                back.y,
+                printer.bottom
+            );
+        }
     }
 }

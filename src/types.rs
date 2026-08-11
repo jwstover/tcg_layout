@@ -85,6 +85,10 @@ pub struct LayoutParams {
     #[serde(default)]
     pub enable_sharpen: bool, // Whether sharpening is enabled
     pub center_layout: bool, // Whether to center the layout on the page
+    #[serde(default = "default_printer_margins")]
+    pub printer_margins: Margins, // Unprintable border the printer forces at the sheet edges
+    #[serde(default)]
+    pub enable_printer_margins: bool, // Whether to lay out and export for the printable area
     #[serde(default)]
     pub hsl_adjustments: Vec<HslAdjustment>, // Targeted color adjustments
     #[serde(default)]
@@ -116,6 +120,13 @@ fn default_sharpen_threshold() -> f32 {
     0.02
 }
 
+/// A plausible forced margin for a consumer inkjet, and only a starting point:
+/// the real numbers come from the printer's specification or a test print, and
+/// the bottom edge is usually the largest.
+fn default_printer_margins() -> Margins {
+    Margins::uniform(5.0)
+}
+
 impl Default for LayoutParams {
     fn default() -> Self {
         Self {
@@ -133,6 +144,8 @@ impl Default for LayoutParams {
             sharpen_threshold: default_sharpen_threshold(),
             enable_sharpen: false, // Disabled by default
             center_layout: false,  // Disabled by default
+            printer_margins: default_printer_margins(),
+            enable_printer_margins: false, // Disabled by default
             hsl_adjustments: Vec::new(),
             enable_color_adjust: false, // Disabled by default
             enable_duplex: false,       // Disabled by default
@@ -192,12 +205,91 @@ impl LayoutParams {
         !self.back_mirror_is_horizontal()
     }
 
-    /// Calculate effective margins based on centering mode
+    /// The printer's unprintable border, or all zeros when the feature is off.
+    ///
+    /// Like `margins`, these are read against the page as it comes out of the
+    /// printer, so they are not rotated for landscape orientation.
+    pub fn effective_printer_margins(&self) -> Margins {
+        if self.enable_printer_margins {
+            self.printer_margins
+        } else {
+            Margins::uniform(0.0)
+        }
+    }
+
+    /// The border the layout has to keep clear of, in mm.
+    ///
+    /// Normally the printer's unprintable border. With duplex on it is
+    /// symmetrized along the mirror axis: a back page is the front mirrored
+    /// about the sheet, but the printer's unprintable border does *not*
+    /// mirror with it, so a card only prints in register if its mirror image
+    /// also lands inside the printable area. That is the intersection of the
+    /// printable area and its own mirror, i.e. the larger of the two facing
+    /// margins on both sides.
+    pub fn layout_printer_margins(&self) -> Margins {
+        let printer = self.effective_printer_margins();
+
+        if !self.enable_duplex {
+            return printer;
+        }
+
+        if self.back_mirror_is_horizontal() {
+            let horizontal = printer.left.max(printer.right);
+            Margins {
+                left: horizontal,
+                right: horizontal,
+                ..printer
+            }
+        } else {
+            let vertical = printer.top.max(printer.bottom);
+            Margins {
+                top: vertical,
+                bottom: vertical,
+                ..printer
+            }
+        }
+    }
+
+    /// Offset from the sheet origin to the printable area's origin, in mm.
+    ///
+    /// Layout coordinates are in physical sheet space; exporters subtract this
+    /// to re-express them in printable-area space.
+    pub fn printable_origin(&self) -> (f32, f32) {
+        let printer = self.effective_printer_margins();
+        (printer.left, printer.top)
+    }
+
+    /// Size of the printable area in mm — the page size exporters emit.
+    ///
+    /// A PDF page that already matches the printer's printable area is neither
+    /// scaled nor re-centered when the driver fits it to that area, so cards
+    /// print at exact size and land where the layout put them on the sheet.
+    pub fn printable_size(&self) -> (f32, f32) {
+        let (page_width, page_height) = self.effective_page_size();
+        let printer = self.effective_printer_margins();
+
+        (
+            (page_width - printer.left - printer.right).max(MIN_PRINTABLE_MM),
+            (page_height - printer.top - printer.bottom).max(MIN_PRINTABLE_MM),
+        )
+    }
+
+    /// Calculate effective margins based on centering mode, in sheet
+    /// coordinates. The printer's unprintable border acts as a floor: nothing
+    /// can be laid out where the printer cannot put ink.
+    ///
     /// When centering is enabled, returns calculated centered margins
     /// When centering is disabled, returns user-specified margins
     pub fn effective_margins(&self, grid: &GridLayout) -> Margins {
+        let printer = self.layout_printer_margins();
+
         if !self.center_layout {
-            return self.margins;
+            return Margins {
+                top: self.margins.top.max(printer.top),
+                right: self.margins.right.max(printer.right),
+                bottom: self.margins.bottom.max(printer.bottom),
+                left: self.margins.left.max(printer.left),
+            };
         }
 
         // Calculate actual grid dimensions
@@ -207,22 +299,36 @@ impl LayoutParams {
             + grid.rows.saturating_sub(1) as f32 * self.spacing.1;
 
         // Get page dimensions considering orientation
-        let (page_width, page_height) = match self.page_orientation {
-            PageOrientation::Portrait => self.page_size,
-            PageOrientation::Landscape => (self.page_size.1, self.page_size.0),
-        };
+        let (page_width, page_height) = self.effective_page_size();
 
-        // Calculate centered margins (split remaining space equally)
-        let margin_h = ((page_width - grid_width) / 2.0).max(0.0);
-        let margin_v = ((page_height - grid_height) / 2.0).max(0.0);
+        // Center on the physical sheet, then pull the grid inside the printable
+        // band. The two differ only when the printer's margins are asymmetric.
+        let left = center_offset(page_width, grid_width, printer.left, printer.right);
+        let top = center_offset(page_height, grid_height, printer.top, printer.bottom);
 
         Margins {
-            left: margin_h,
-            right: margin_h,
-            top: margin_v,
-            bottom: margin_v,
+            left,
+            right: (page_width - grid_width - left).max(0.0),
+            top,
+            bottom: (page_height - grid_height - top).max(0.0),
         }
     }
+}
+
+/// Smallest page an export will emit, so absurd printer margins can't produce
+/// a zero or negative page size.
+const MIN_PRINTABLE_MM: f32 = 1.0;
+
+/// Offset that centers `content` within `page`, pulled inside the printable
+/// band `[near, page - far]` when that band isn't centered on the sheet.
+fn center_offset(page: f32, content: f32, near: f32, far: f32) -> f32 {
+    let centered = ((page - content) / 2.0).max(0.0);
+    // Keep the range non-empty when the content cannot fit the band at all;
+    // staying clear of the near edge is the better failure mode, since the
+    // grid calculation already sized the grid to the band.
+    let furthest = (page - far - content).max(near);
+
+    centered.clamp(near, furthest)
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -859,5 +965,237 @@ mod tests {
         assert_eq!(effective.right, 25.0);
         assert_eq!(effective.top, 40.0);
         assert_eq!(effective.bottom, 40.0);
+    }
+
+    /// Printer margins with typical asymmetry: a bigger bottom edge, where the
+    /// paper feed grips the sheet.
+    fn asymmetric_printer_margins() -> Margins {
+        Margins {
+            top: 3.0,
+            right: 3.0,
+            bottom: 15.0,
+            left: 3.0,
+        }
+    }
+
+    #[test]
+    fn test_printer_margins_default_off_and_inert() {
+        let params = LayoutParams::default();
+
+        assert!(!params.enable_printer_margins);
+        assert_eq!(params.effective_printer_margins(), Margins::uniform(0.0));
+        assert_eq!(params.printable_origin(), (0.0, 0.0));
+        assert_eq!(params.printable_size(), params.effective_page_size());
+    }
+
+    #[test]
+    fn test_printable_size_and_origin() {
+        let params = LayoutParams {
+            page_size: (210.0, 297.0),
+            enable_printer_margins: true,
+            printer_margins: asymmetric_printer_margins(),
+            ..Default::default()
+        };
+
+        assert_eq!(params.printable_size(), (204.0, 279.0));
+        assert_eq!(params.printable_origin(), (3.0, 3.0));
+    }
+
+    #[test]
+    fn test_printable_size_landscape_uses_oriented_page() {
+        let params = LayoutParams {
+            page_size: (210.0, 297.0),
+            page_orientation: PageOrientation::Landscape,
+            enable_printer_margins: true,
+            printer_margins: Margins::uniform(5.0),
+            ..Default::default()
+        };
+
+        // Printer margins read against the page as it comes out of the printer
+        assert_eq!(params.printable_size(), (287.0, 200.0));
+    }
+
+    #[test]
+    fn test_printable_size_never_collapses() {
+        let params = LayoutParams {
+            page_size: (20.0, 20.0),
+            enable_printer_margins: true,
+            printer_margins: Margins::uniform(30.0),
+            ..Default::default()
+        };
+
+        let (width, height) = params.printable_size();
+        assert!(width > 0.0 && height > 0.0);
+    }
+
+    #[test]
+    fn test_effective_margins_floored_by_printer_margins() {
+        let params = LayoutParams {
+            page_size: (210.0, 297.0),
+            margins: Margins::uniform(5.0),
+            enable_printer_margins: true,
+            printer_margins: asymmetric_printer_margins(),
+            center_layout: false,
+            ..Default::default()
+        };
+        let grid = calculate_test_grid();
+
+        let effective = params.effective_margins(&grid);
+
+        // The user's 5mm wins where the printer can reach that far in;
+        // the printer's 15mm bottom wins where it cannot
+        assert_eq!(effective.top, 5.0);
+        assert_eq!(effective.left, 5.0);
+        assert_eq!(effective.right, 5.0);
+        assert_eq!(effective.bottom, 15.0);
+    }
+
+    #[test]
+    fn test_effective_margins_unchanged_when_printer_margins_disabled() {
+        let with_margins = LayoutParams {
+            page_size: (210.0, 297.0),
+            margins: Margins::uniform(5.0),
+            printer_margins: Margins::uniform(20.0),
+            enable_printer_margins: false,
+            ..Default::default()
+        };
+        let grid = calculate_test_grid();
+
+        assert_eq!(with_margins.effective_margins(&grid), Margins::uniform(5.0));
+    }
+
+    #[test]
+    fn test_centered_layout_clamped_into_printable_band() {
+        // Sheet-centered would put the grid 10mm from the top and bottom,
+        // which is inside the printer's 15mm bottom border
+        let params = LayoutParams {
+            page_size: (100.0, 100.0),
+            card_size: (40.0, 80.0),
+            spacing: (0.0, 0.0),
+            center_layout: true,
+            enable_printer_margins: true,
+            printer_margins: asymmetric_printer_margins(),
+            ..Default::default()
+        };
+        let grid = GridLayout {
+            rows: 1,
+            cols: 1,
+            cards_per_page: 1,
+            total_pages: 1,
+        };
+
+        let effective = params.effective_margins(&grid);
+
+        // Pulled up until the grid's bottom edge sits on the printable
+        // boundary: 100 - 15 - 80 = 5mm from the top
+        assert_eq!(effective.top, 5.0);
+        assert_eq!(effective.bottom, 15.0);
+        // Left/right are symmetric and clear of the border, so untouched
+        assert_eq!(effective.left, 30.0);
+        assert_eq!(effective.right, 30.0);
+    }
+
+    #[test]
+    fn test_centered_layout_too_tall_for_band_keeps_near_edge_clear() {
+        // A grid taller than the printable band can't be placed legally at all
+        // (the grid calculation forces at least one card). Clearing the near
+        // edge is the better failure: the overflow is clipped on one side
+        // instead of both.
+        let params = LayoutParams {
+            page_size: (100.0, 100.0),
+            card_size: (40.0, 90.0),
+            spacing: (0.0, 0.0),
+            center_layout: true,
+            enable_printer_margins: true,
+            printer_margins: asymmetric_printer_margins(),
+            ..Default::default()
+        };
+        let grid = GridLayout {
+            rows: 1,
+            cols: 1,
+            cards_per_page: 1,
+            total_pages: 1,
+        };
+
+        let effective = params.effective_margins(&grid);
+
+        assert_eq!(effective.top, 3.0);
+    }
+
+    #[test]
+    fn test_centered_layout_stays_sheet_centered_when_band_allows() {
+        let params = LayoutParams {
+            page_size: (100.0, 100.0),
+            card_size: (40.0, 60.0),
+            spacing: (0.0, 0.0),
+            center_layout: true,
+            enable_printer_margins: true,
+            printer_margins: asymmetric_printer_margins(),
+            ..Default::default()
+        };
+        let grid = GridLayout {
+            rows: 1,
+            cols: 1,
+            cards_per_page: 1,
+            total_pages: 1,
+        };
+
+        let effective = params.effective_margins(&grid);
+
+        // (100 - 60) / 2 = 20mm, clear of the 3mm top and 15mm bottom
+        assert_eq!(effective.top, 20.0);
+        assert_eq!(effective.bottom, 20.0);
+    }
+
+    #[test]
+    fn test_layout_printer_margins_symmetrized_for_duplex() {
+        let params = LayoutParams {
+            page_size: (210.0, 297.0),
+            enable_printer_margins: true,
+            printer_margins: asymmetric_printer_margins(),
+            enable_duplex: true,
+            // Portrait + short edge flips about a horizontal axis, mirroring y
+            flip_edge: FlipEdge::ShortEdge,
+            ..Default::default()
+        };
+
+        // A card mirrored onto the back would land in the facing border unless
+        // both edges keep clear of the larger of the two
+        let layout = params.layout_printer_margins();
+        assert_eq!(layout.top, 15.0);
+        assert_eq!(layout.bottom, 15.0);
+        // The mirror doesn't touch x, so those stay as the printer reports them
+        assert_eq!(layout.left, 3.0);
+        assert_eq!(layout.right, 3.0);
+
+        // The printable area itself is unchanged: it's what the page is sized to
+        assert_eq!(
+            params.effective_printer_margins(),
+            asymmetric_printer_margins()
+        );
+    }
+
+    #[test]
+    fn test_layout_printer_margins_untouched_without_duplex() {
+        let params = LayoutParams {
+            enable_printer_margins: true,
+            printer_margins: asymmetric_printer_margins(),
+            enable_duplex: false,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            params.layout_printer_margins(),
+            asymmetric_printer_margins()
+        );
+    }
+
+    fn calculate_test_grid() -> GridLayout {
+        GridLayout {
+            rows: 2,
+            cols: 2,
+            cards_per_page: 4,
+            total_pages: 1,
+        }
     }
 }

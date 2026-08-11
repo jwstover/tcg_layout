@@ -1,5 +1,5 @@
 use crate::layout::calculate_cut_marks;
-use crate::types::{LayoutParams, PageLayout, PageOrientation, PageSide};
+use crate::types::{LayoutParams, PageLayout, PageSide};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use svg::node::element::{Definitions, Element, Group, Image, Line, Rectangle};
@@ -184,8 +184,9 @@ impl SvgExporter {
         if page.side == PageSide::Front {
             let cut_marks =
                 calculate_cut_marks(&self.params, &crate::layout::calculate_grid(&self.params));
+            let origin = self.params.printable_origin();
             for cut_mark in &cut_marks {
-                main_group = main_group.add(cut_mark_line(cut_mark));
+                main_group = main_group.add(cut_mark_line(cut_mark, origin));
             }
         }
 
@@ -290,8 +291,9 @@ impl SvgExporter {
             if page.side == PageSide::Front {
                 let cut_marks =
                     calculate_cut_marks(&self.params, &crate::layout::calculate_grid(&self.params));
+                let origin = self.params.printable_origin();
                 for cut_mark in &cut_marks {
-                    page_group = page_group.add(cut_mark_line(cut_mark));
+                    page_group = page_group.add(cut_mark_line(cut_mark, origin));
                 }
             }
 
@@ -405,6 +407,12 @@ impl SvgExporter {
                 )
             };
 
+        // Layout coordinates are on the physical sheet; the page is the
+        // printable area, so shift by the printable area's origin.
+        let (origin_x, origin_y) = self.params.printable_origin();
+        let img_x = img_x - origin_x;
+        let img_y = img_y - origin_y;
+
         let mut image = Image::new()
             .set("x", img_x)
             .set("y", img_y)
@@ -437,21 +445,23 @@ impl SvgExporter {
         }
     }
 
+    /// The size of the emitted SVG page: the printer's printable area, which is
+    /// the whole sheet unless printer margins are configured.
     fn get_page_dimensions(&self) -> (f32, f32) {
-        match self.params.page_orientation {
-            PageOrientation::Portrait => self.params.page_size,
-            PageOrientation::Landscape => (self.params.page_size.1, self.params.page_size.0),
-        }
+        self.params.printable_size()
     }
 }
 
-/// Build the SVG line element for a single cut mark.
-fn cut_mark_line(cut_mark: &crate::types::CutMark) -> Line {
+/// Build the SVG line element for a single cut mark, shifted from sheet
+/// coordinates into the printable area the page represents.
+fn cut_mark_line(cut_mark: &crate::types::CutMark, origin: (f32, f32)) -> Line {
+    let (origin_x, origin_y) = origin;
+
     Line::new()
-        .set("x1", cut_mark.x1)
-        .set("y1", cut_mark.y1)
-        .set("x2", cut_mark.x2)
-        .set("y2", cut_mark.y2)
+        .set("x1", cut_mark.x1 - origin_x)
+        .set("y1", cut_mark.y1 - origin_y)
+        .set("x2", cut_mark.x2 - origin_x)
+        .set("y2", cut_mark.y2 - origin_y)
         .set("stroke", "#808080") // Gray color
         .set("stroke-width", "0.5") // Thin line
         .set("stroke-linecap", "round")
@@ -634,6 +644,67 @@ mod tests {
         assert!(content.contains("card1.jpg"));
         assert!(content.contains("card2.jpg"));
         assert!(content.contains("card3.jpg"));
+    }
+
+    #[test]
+    fn test_get_page_dimensions_is_printable_area() {
+        let params = LayoutParams {
+            page_size: (210.0, 297.0),
+            enable_printer_margins: true,
+            printer_margins: Margins {
+                top: 3.0,
+                right: 3.0,
+                bottom: 15.0,
+                left: 3.0,
+            },
+            ..create_test_params()
+        };
+        let exporter = SvgExporter::new(params);
+
+        assert_eq!(exporter.get_page_dimensions(), (204.0, 279.0));
+    }
+
+    #[test]
+    fn test_export_shifts_content_into_printable_area() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("printer_margins.svg");
+        let params = LayoutParams {
+            enable_printer_margins: true,
+            printer_margins: Margins::uniform(4.0),
+            ..create_test_params()
+        };
+        let page = create_test_page();
+
+        export_page_to_svg(&page, &params, &output_path).unwrap();
+        let content = std::fs::read_to_string(&output_path).unwrap();
+
+        // The page is the printable area, not the 100x150 sheet
+        assert!(content.contains("width=\"92mm\""), "{content}");
+        assert!(content.contains("height=\"142mm\""), "{content}");
+        assert!(content.contains("viewBox=\"0 0 92 142\""), "{content}");
+
+        // A card at sheet (5,5) lands 1mm inside the printable area's origin
+        assert!(content.contains("x=\"1\""), "{content}");
+        assert!(content.contains("y=\"1\""), "{content}");
+    }
+
+    #[test]
+    fn test_export_unshifted_when_printer_margins_disabled() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("no_printer_margins.svg");
+        // Values are stored but inactive, so the sheet is still the page
+        let params = LayoutParams {
+            enable_printer_margins: false,
+            printer_margins: Margins::uniform(4.0),
+            ..create_test_params()
+        };
+
+        export_page_to_svg(&create_test_page(), &params, &output_path).unwrap();
+        let content = std::fs::read_to_string(&output_path).unwrap();
+
+        assert!(content.contains("width=\"100mm\""));
+        assert!(content.contains("height=\"150mm\""));
+        assert!(content.contains("x=\"5\""));
     }
 
     #[test]
