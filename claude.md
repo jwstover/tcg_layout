@@ -15,7 +15,7 @@ Desktop application that automatically lays out Trading Card Game (TCG) card ima
 
 ### Build Commands
 - `cargo run --bin tcg_layout` - Run the application
-- `cargo test` - Run all tests (~290 test executions; shared modules run in both the lib and bin trees)
+- `cargo test` - Run all tests (~294 test executions; shared modules run in both the lib and bin trees)
 - `cargo clippy` - Run linter checks
 - `cargo fmt` - Format code
 
@@ -155,7 +155,7 @@ struct PageLayout {
 - When the mirror is vertical (horizontal-axis flip), back images must also print rotated 180° or cut cards come out head-to-toe. `LayoutParams::backs_rotated_180()` encodes this; exporters and the preview rotate back-page images when `page.side == Back && backs_rotated_180()` (PDF rotates pixels via `image::rotate180` with the dedup cache keyed by `(path, rotated)`; SVG uses a `rotate(180 cx cy)` transform; the preview inverts texture UVs).
 - `calculate_card_position(index, grid, params)` -> `CardPosition` - Computes x,y for a card at a given index. Uses effective_margins() and respects fill order.
 - `generate_positions(grid, params)` -> `Vec<CardPosition>` - All positions for one page.
-- `calculate_cut_marks(grid, params)` -> `Vec<CutMark>` - Generates vertical and horizontal cut marks at card edges, extending to page boundaries.
+- `calculate_cut_marks(grid, params)` -> `Vec<CutMark>` - Generates cut marks for **every** intersection of a vertical and a horizontal trim line, interior ones included. `cut_line_coords()` builds the distinct trim coordinates per axis (adjacent cards with zero spacing share an edge, so duplicates collapse within `CUT_LINE_EPSILON_MM`); each trim line then gets one segment straddling every crossing line, reaching `CUT_MARK_OVERLAP_MM` (2.0, capped at half the card dimension) past it on both sides. The outermost segments run on out to the page edges instead of stopping at the overlap. Result: a cross at every card corner, so cutting along one line always leaves a stub of every mark perpendicular to it on both sides of the blade. With nonzero spacing a gutter has two distinct trim lines, so the four adjacent card corners render as a hash rather than a single cross; butted cards (zero spacing) give one clean cross. Because the overlap reaches into the card area — and because bleed images cover the margins — all three renderers (SVG, PDF, preview) draw cut marks **after/on top of** the card images.
 
 **2. Thumbnail Manager** (`thumbnail_manager.rs`)
 - Async background loading via tokio::spawn with blocking tasks
@@ -279,7 +279,7 @@ struct PageLayout {
 
 ### Test Structure
 - Unit tests colocated in each module using `#[cfg(test)]`
-- ~290 test executions total (shared modules compile into both lib and bin trees)
+- ~294 test executions total (shared modules compile into both lib and bin trees)
 - Async tests in `thumbnail_manager.rs` use tokio runtime
 
 ### Running Tests
@@ -295,13 +295,13 @@ cargo test settings           # Settings persistence tests
 ```
 
 ### Test Coverage Areas
-- Layout grid calculations (39 tests): grid sizing, distribution, positions, centering, cut marks, duplex mirroring/interleaving
+- Layout grid calculations (44 tests): grid sizing, distribution, positions, centering, cut marks (page-edge runs, crosses at every intersection incl. interior, zero-spacing edge collapse, `cut_line_coords` coordinates, half-card overlap cap), duplex mirroring/interleaving
 - Image processing (6 tests): thumbnails, aspect ratio, DPI
 - Bleed (11 tests): pixel calculations, edge replication, zero bleed
 - Sharpen (8 tests): identity at zero, flat-image invariance, edge contrast, alpha preservation
 - Color adjust (25 tests): RGB↔HSL round trip, chroma recovery, noop/empty identity, gray and near-black/near-white invariance, hue targeting and wraparound, feather bounds, alpha preservation, scope filtering (per-side activity, legacy JSON defaults to All), dropper sampling (circular mean, seam, gray, near-black noise rejection, bounds)
 - Thumbnail manager (7 tests): async loading, caching, deduplication, cache key discrimination
-- SVG export (20 tests): single/multi-page, cut marks (front pages only), bleed, sharpening, processed image directory, backs-only adjustment scoping
+- SVG export (21 tests): single/multi-page, cut marks (front pages only, emitted after images), bleed, sharpening, processed image directory, backs-only adjustment scoping
 - PDF export (13 tests): multi-page, real images, sharpening, sharpening + bleed, duplex end-to-end, backs-only adjustment scoping
 - Settings (5 tests): serialization, defaults, duplex backwards compatibility
 - Types (various): enum behavior, defaults, validation

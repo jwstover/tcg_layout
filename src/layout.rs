@@ -212,14 +212,40 @@ pub fn generate_positions(params: &LayoutParams, grid: &GridLayout) -> Vec<CardP
     positions
 }
 
-/// How far a cut mark reaches past the trim edge into the card area, in mm.
+/// How far a cut mark reaches past a trim edge, in mm.
 ///
-/// Without this, a vertical mark would stop exactly where the horizontal marks
-/// start, so cutting along one line removes the entire stub of every mark
-/// perpendicular to it. Overlapping the two by a small amount leaves a cross at
-/// each grid corner, so a remnant of the perpendicular mark survives on the
-/// keeper side of every cut.
+/// Marks straddle every trim line they meet rather than stopping at it, so each
+/// intersection of a vertical and a horizontal cut line carries a cross. Cutting
+/// along one line therefore always leaves a stub of every mark perpendicular to
+/// it on both sides of the blade, which is what keeps the remaining cuts
+/// registered once the margins are gone.
 pub const CUT_MARK_OVERLAP_MM: f32 = 2.0;
+
+/// Tolerance for treating two computed cut-line coordinates as the same line.
+const CUT_LINE_EPSILON_MM: f32 = 1e-4;
+
+/// The distinct cut-line coordinates along one axis, ascending.
+///
+/// Each card contributes a leading and a trailing trim line; with zero spacing
+/// adjacent cards share one, so duplicates are collapsed.
+fn cut_line_coords(start: f32, count: usize, card_size: f32, spacing: f32) -> Vec<f32> {
+    let mut coords = Vec::with_capacity(count * 2);
+
+    for i in 0..count {
+        let leading = start + i as f32 * (card_size + spacing);
+
+        for coord in [leading, leading + card_size] {
+            let is_new = coords
+                .last()
+                .is_none_or(|last: &f32| (coord - last).abs() > CUT_LINE_EPSILON_MM);
+            if is_new {
+                coords.push(coord);
+            }
+        }
+    }
+
+    coords
+}
 
 pub fn calculate_cut_marks(params: &LayoutParams, grid: &GridLayout) -> Vec<CutMark> {
     let mut cut_marks = Vec::new();
@@ -232,100 +258,63 @@ pub fn calculate_cut_marks(params: &LayoutParams, grid: &GridLayout) -> Vec<CutM
 
     // Use effective margins for cut mark positioning
     let effective_margins = params.effective_margins(grid);
-    let start_x = effective_margins.left;
-    let start_y = effective_margins.top;
-    let card_width_with_spacing = params.card_size.0 + params.spacing.0;
-    let card_height_with_spacing = params.card_size.1 + params.spacing.1;
 
-    // Calculate the bounds of the card grid (using trim positions, not bleed positions)
-    // Note: When bleed is enabled, actual images extend beyond these bounds by bleed_mm
-    let grid_bottom =
-        start_y + (grid.rows as f32 - 1.0) * card_height_with_spacing + params.card_size.1;
-    let grid_right =
-        start_x + (grid.cols as f32 - 1.0) * card_width_with_spacing + params.card_size.0;
+    // The trim lines the blade follows, in mm from the page origin.
+    // Note: when bleed is enabled the images extend past the outermost of these
+    // by bleed_mm, which is why all renderers draw the marks over the images.
+    let x_lines = cut_line_coords(
+        effective_margins.left,
+        grid.cols,
+        params.card_size.0,
+        params.spacing.0,
+    );
+    let y_lines = cut_line_coords(
+        effective_margins.top,
+        grid.rows,
+        params.card_size.1,
+        params.spacing.1,
+    );
 
-    // Reach past the trim edge into the card area so perpendicular marks cross
-    // at the grid corners. Capped at half a card so the overlap can never span a
-    // whole card and meet the marks coming from the opposite side.
+    // How far a mark reaches past each trim line it crosses. Capped at half a
+    // card so the reach from opposite edges can never span a whole card.
     let overlap_x = CUT_MARK_OVERLAP_MM.min(params.card_size.0 / 2.0);
     let overlap_y = CUT_MARK_OVERLAP_MM.min(params.card_size.1 / 2.0);
 
-    // Vertical cut marks - at the left and right edge of each card
-    for col in 0..grid.cols {
-        let card_left_x = start_x + col as f32 * card_width_with_spacing;
-        let card_right_x = card_left_x + params.card_size.0;
-
-        // Left edge of card - extend from page edge to just past the top margin,
-        // and from just above the grid bottom to the page edge
-        cut_marks.push(CutMark {
-            x1: card_left_x,
-            y1: 0.0, // Top edge of page
-            x2: card_left_x,
-            y2: start_y + overlap_y, // Past the top trim edge
-            mark_type: CutMarkType::Vertical,
-        });
-        cut_marks.push(CutMark {
-            x1: card_left_x,
-            y1: grid_bottom - overlap_y, // Past the bottom trim edge
-            x2: card_left_x,
-            y2: page_height, // Bottom edge of page
-            mark_type: CutMarkType::Vertical,
-        });
-
-        // Right edge of card - same treatment
-        cut_marks.push(CutMark {
-            x1: card_right_x,
-            y1: 0.0, // Top edge of page
-            x2: card_right_x,
-            y2: start_y + overlap_y, // Past the top trim edge
-            mark_type: CutMarkType::Vertical,
-        });
-        cut_marks.push(CutMark {
-            x1: card_right_x,
-            y1: grid_bottom - overlap_y, // Past the bottom trim edge
-            x2: card_right_x,
-            y2: page_height, // Bottom edge of page
-            mark_type: CutMarkType::Vertical,
-        });
+    // Vertical marks: on every vertical trim line, one segment straddling each
+    // horizontal trim line, so the pair forms a cross at that intersection. The
+    // outermost segments run on out to the page edges instead of stopping short,
+    // which is what makes the marks visible outside the card area.
+    for &x in &x_lines {
+        for (i, &y) in y_lines.iter().enumerate() {
+            cut_marks.push(CutMark {
+                x1: x,
+                y1: if i == 0 { 0.0 } else { y - overlap_y },
+                x2: x,
+                y2: if i == y_lines.len() - 1 {
+                    page_height
+                } else {
+                    y + overlap_y
+                },
+                mark_type: CutMarkType::Vertical,
+            });
+        }
     }
 
-    // Horizontal cut marks - at the top and bottom edge of each card
-    for row in 0..grid.rows {
-        let card_top_y = start_y + row as f32 * card_height_with_spacing;
-        let card_bottom_y = card_top_y + params.card_size.1;
-
-        // Top edge of card - extend from page edge to just past the left margin,
-        // and from just inside the grid right edge to the page edge
-        cut_marks.push(CutMark {
-            x1: 0.0, // Left edge of page
-            y1: card_top_y,
-            x2: start_x + overlap_x, // Past the left trim edge
-            y2: card_top_y,
-            mark_type: CutMarkType::Horizontal,
-        });
-        cut_marks.push(CutMark {
-            x1: grid_right - overlap_x, // Past the right trim edge
-            y1: card_top_y,
-            x2: page_width, // Right edge of page
-            y2: card_top_y,
-            mark_type: CutMarkType::Horizontal,
-        });
-
-        // Bottom edge of card - same treatment
-        cut_marks.push(CutMark {
-            x1: 0.0, // Left edge of page
-            y1: card_bottom_y,
-            x2: start_x + overlap_x, // Past the left trim edge
-            y2: card_bottom_y,
-            mark_type: CutMarkType::Horizontal,
-        });
-        cut_marks.push(CutMark {
-            x1: grid_right - overlap_x, // Past the right trim edge
-            y1: card_bottom_y,
-            x2: page_width, // Right edge of page
-            y2: card_bottom_y,
-            mark_type: CutMarkType::Horizontal,
-        });
+    // Horizontal marks: the same, with the axes swapped
+    for &y in &y_lines {
+        for (i, &x) in x_lines.iter().enumerate() {
+            cut_marks.push(CutMark {
+                x1: if i == 0 { 0.0 } else { x - overlap_x },
+                y1: y,
+                x2: if i == x_lines.len() - 1 {
+                    page_width
+                } else {
+                    x + overlap_x
+                },
+                y2: y,
+                mark_type: CutMarkType::Horizontal,
+            });
+        }
     }
 
     cut_marks
@@ -968,57 +957,136 @@ mod tests {
         let grid_right = 10.0 + (grid.cols as f32 - 1.0) * 45.0 + 40.0;
         let grid_bottom = 10.0 + (grid.rows as f32 - 1.0) * 68.0 + 60.0;
 
-        // Vertical marks reach CUT_MARK_OVERLAP_MM past the top and bottom trim
-        // edges; horizontal marks reach the same distance past left and right.
-        let verticals: Vec<_> = marks
+        // The marks that run off the page reach the page edge at one end and
+        // CUT_MARK_OVERLAP_MM past the outermost trim line at the other.
+        let from_top = marks
             .iter()
-            .filter(|m| m.mark_type == CutMarkType::Vertical)
-            .collect();
-        let horizontals: Vec<_> = marks
-            .iter()
-            .filter(|m| m.mark_type == CutMarkType::Horizontal)
-            .collect();
-        assert!(!verticals.is_empty() && !horizontals.is_empty());
+            .find(|m| m.mark_type == CutMarkType::Vertical && m.y1 == 0.0)
+            .expect("vertical mark from the top page edge");
+        assert_eq!(from_top.y2, 10.0 + CUT_MARK_OVERLAP_MM);
 
-        for m in verticals {
-            if m.y1 == 0.0 {
-                assert_eq!(m.y2, 10.0 + CUT_MARK_OVERLAP_MM);
-            } else {
-                assert_eq!(m.y1, grid_bottom - CUT_MARK_OVERLAP_MM);
-                assert_eq!(m.y2, 300.0);
+        let to_bottom = marks
+            .iter()
+            .find(|m| m.mark_type == CutMarkType::Vertical && m.y2 == 300.0)
+            .expect("vertical mark to the bottom page edge");
+        assert_eq!(to_bottom.y1, grid_bottom - CUT_MARK_OVERLAP_MM);
+
+        let from_left = marks
+            .iter()
+            .find(|m| m.mark_type == CutMarkType::Horizontal && m.x1 == 0.0)
+            .expect("horizontal mark from the left page edge");
+        assert_eq!(from_left.x2, 10.0 + CUT_MARK_OVERLAP_MM);
+
+        let to_right = marks
+            .iter()
+            .find(|m| m.mark_type == CutMarkType::Horizontal && m.x2 == 200.0)
+            .expect("horizontal mark to the right page edge");
+        assert_eq!(to_right.x1, grid_right - CUT_MARK_OVERLAP_MM);
+
+        // Every mark stays on its own axis
+        for m in &marks {
+            match m.mark_type {
+                CutMarkType::Vertical => assert_eq!(m.x1, m.x2),
+                CutMarkType::Horizontal => assert_eq!(m.y1, m.y2),
             }
         }
-        for m in horizontals {
-            if m.x1 == 0.0 {
-                assert_eq!(m.x2, 10.0 + CUT_MARK_OVERLAP_MM);
-            } else {
-                assert_eq!(m.x1, grid_right - CUT_MARK_OVERLAP_MM);
-                assert_eq!(m.x2, 200.0);
+    }
+
+    /// Whether a vertical and a horizontal mark cross at (x, y): each must span
+    /// strictly past the other's line, not merely touch it.
+    fn has_cross_at(marks: &[CutMark], x: f32, y: f32) -> bool {
+        let vertical = marks.iter().any(|m| {
+            m.mark_type == CutMarkType::Vertical
+                && (m.x1 - x).abs() < 1e-3
+                && m.y1.min(m.y2) < y - 1e-3
+                && m.y1.max(m.y2) > y + 1e-3
+        });
+        let horizontal = marks.iter().any(|m| {
+            m.mark_type == CutMarkType::Horizontal
+                && (m.y1 - y).abs() < 1e-3
+                && m.x1.min(m.x2) < x - 1e-3
+                && m.x1.max(m.x2) > x + 1e-3
+        });
+        vertical && horizontal
+    }
+
+    #[test]
+    fn test_cut_marks_cross_at_every_intersection() {
+        // Multi-row, multi-column grid with spacing, so interior trim lines are
+        // distinct from the grid's outer bounds.
+        let params = LayoutParams {
+            page_size: (200.0, 300.0),
+            card_size: (40.0, 60.0),
+            margins: Margins::uniform(10.0),
+            spacing: (5.0, 8.0),
+            ..Default::default()
+        };
+        let grid = calculate_grid(&params);
+        assert!(
+            grid.cols >= 2 && grid.rows >= 2,
+            "need an interior intersection to test"
+        );
+        let marks = calculate_cut_marks(&params, &grid);
+
+        let x_lines = cut_line_coords(10.0, grid.cols, 40.0, 5.0);
+        let y_lines = cut_line_coords(10.0, grid.rows, 60.0, 8.0);
+
+        // Both outer corners and interior intersections carry a cross
+        for &x in &x_lines {
+            for &y in &y_lines {
+                assert!(
+                    has_cross_at(&marks, x, y),
+                    "no cross at trim intersection ({x}, {y})"
+                );
             }
         }
     }
 
     #[test]
-    fn test_cut_marks_cross_at_grid_corner() {
-        let params = LayoutParams::default();
+    fn test_cut_marks_cross_with_zero_spacing() {
+        // Zero spacing makes adjacent cards share a trim line; the shared line
+        // must still carry crosses at every row boundary.
+        let params = LayoutParams {
+            page_size: (200.0, 300.0),
+            card_size: (40.0, 60.0),
+            margins: Margins::uniform(10.0),
+            spacing: (0.0, 0.0),
+            ..Default::default()
+        };
         let grid = calculate_grid(&params);
         let marks = calculate_cut_marks(&params, &grid);
-        let m = params.effective_margins(&grid);
 
-        // The mark on the top trim edge must extend past the left trim edge, and
-        // the mark on the left trim edge must extend past the top trim edge, so
-        // the two form a cross at the grid's top-left corner.
-        let top_edge = marks
-            .iter()
-            .find(|k| k.mark_type == CutMarkType::Horizontal && k.y1 == m.top && k.x1 == 0.0)
-            .expect("top trim edge mark");
-        let left_edge = marks
-            .iter()
-            .find(|k| k.mark_type == CutMarkType::Vertical && k.x1 == m.left && k.y1 == 0.0)
-            .expect("left trim edge mark");
+        let x_lines = cut_line_coords(10.0, grid.cols, 40.0, 0.0);
+        let y_lines = cut_line_coords(10.0, grid.rows, 60.0, 0.0);
 
-        assert!(top_edge.x2 > m.left, "horizontal mark stops at the corner");
-        assert!(left_edge.y2 > m.top, "vertical mark stops at the corner");
+        // Shared edges collapse: N cards yield N+1 lines, not 2N
+        assert_eq!(x_lines.len(), grid.cols + 1);
+        assert_eq!(y_lines.len(), grid.rows + 1);
+
+        for &x in &x_lines {
+            for &y in &y_lines {
+                assert!(
+                    has_cross_at(&marks, x, y),
+                    "no cross at trim intersection ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cut_line_coords_spacing_variants() {
+        // With spacing, every card contributes two distinct lines
+        assert_eq!(
+            cut_line_coords(10.0, 3, 40.0, 5.0),
+            vec![10.0, 50.0, 55.0, 95.0, 100.0, 140.0]
+        );
+        // Without spacing, shared edges collapse to one line each
+        assert_eq!(
+            cut_line_coords(10.0, 3, 40.0, 0.0),
+            vec![10.0, 50.0, 90.0, 130.0]
+        );
+        // A single card is just its two edges
+        assert_eq!(cut_line_coords(0.0, 1, 63.0, 2.0), vec![0.0, 63.0]);
     }
 
     #[test]
