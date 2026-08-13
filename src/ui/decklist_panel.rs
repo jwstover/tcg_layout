@@ -8,6 +8,10 @@ pub struct DecklistState {
     pub decklist_text: String,
     pub api_key: String,
     pub show_api_key: bool,
+    /// True once the API key field has been edited since the last save. The
+    /// keyring write only fires on focus-lost (not per keystroke), so this
+    /// tracks whether there's actually a pending change to flush.
+    pub api_key_dirty: bool,
     pub parsed_entries: Vec<DecklistEntry>,
     pub matched_cards: Vec<MatchedCard>,
     pub is_processing: bool,
@@ -28,6 +32,8 @@ pub struct DecklistState {
     // Google Drive state
     pub google_drive_api_key: String,
     pub show_google_drive_api_key: bool,
+    /// Same debouncing purpose as `api_key_dirty`, for the Drive API key field.
+    pub google_drive_api_key_dirty: bool,
     pub google_drive_folder_url: String,
     pub is_building_drive_index: bool,
     pub drive_index_updated_at: Option<u64>,
@@ -42,6 +48,7 @@ impl Default for DecklistState {
             decklist_text: String::new(),
             api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
             show_api_key: false,
+            api_key_dirty: false,
             parsed_entries: Vec::new(),
             matched_cards: Vec::new(),
             is_processing: false,
@@ -60,6 +67,7 @@ impl Default for DecklistState {
             marvel_champions_dir: crate::settings::default_marvel_champions_dir(),
             google_drive_api_key: String::new(),
             show_google_drive_api_key: false,
+            google_drive_api_key_dirty: false,
             google_drive_folder_url: String::new(),
             is_building_drive_index: false,
             drive_index_updated_at: None,
@@ -71,6 +79,7 @@ impl Default for DecklistState {
 }
 
 pub struct DecklistPanelActions {
+    pub browse_marvel_dir_clicked: bool,
     pub api_key_changed: bool,
     pub marvel_dir_changed: bool,
     pub google_drive_api_key_changed: bool,
@@ -93,11 +102,15 @@ where
     MI: FnMut(&[MatchedCard]),
 {
     // Store original values to detect changes
-    let original_api_key = decklist_state.api_key.clone();
     let original_marvel_dir = decklist_state.marvel_champions_dir.clone();
-    let original_google_drive_api_key = decklist_state.google_drive_api_key.clone();
     let original_google_drive_folder_url = decklist_state.google_drive_folder_url.clone();
     let mut start_build_index = false;
+    let mut browse_marvel_dir_clicked = false;
+    // API keys save to the OS keyring, which can be slow (or block on an
+    // unfocused system prompt) — only flag a save on focus-lost, not on
+    // every keystroke.
+    let mut api_key_changed = false;
+    let mut google_drive_api_key_changed = false;
 
     ui.heading("Decklist Import");
     ui.add_space(8.0);
@@ -129,13 +142,7 @@ where
                 .truncate(),
             );
             if ui.button("Browse").clicked() {
-                if let Some(dir) = rfd::FileDialog::new()
-                    .set_title("Select Marvel Champions Images Directory")
-                    .set_directory(&decklist_state.marvel_champions_dir)
-                    .pick_folder()
-                {
-                    decklist_state.marvel_champions_dir = dir;
-                }
+                browse_marvel_dir_clicked = true;
             }
         });
         ui.add_space(4.0);
@@ -285,8 +292,16 @@ where
         ui.horizontal(|ui| {
             ui.label("OpenAI API Key:");
             if decklist_state.show_api_key {
-                ui.text_edit_singleline(&mut decklist_state.api_key)
+                let response = ui
+                    .text_edit_singleline(&mut decklist_state.api_key)
                     .on_hover_text("Your OpenAI API key for card name matching");
+                if response.changed() {
+                    decklist_state.api_key_dirty = true;
+                }
+                if response.lost_focus() && decklist_state.api_key_dirty {
+                    api_key_changed = true;
+                    decklist_state.api_key_dirty = false;
+                }
             } else {
                 let mut masked_key = "*".repeat(decklist_state.api_key.len().min(20));
                 if ui.text_edit_singleline(&mut masked_key).changed() {
@@ -332,8 +347,16 @@ where
         ui.horizontal(|ui| {
             ui.label("Drive API Key:");
             if decklist_state.show_google_drive_api_key {
-                ui.text_edit_singleline(&mut decklist_state.google_drive_api_key)
+                let response = ui
+                    .text_edit_singleline(&mut decklist_state.google_drive_api_key)
                     .on_hover_text("Google Cloud API key with Drive API enabled");
+                if response.changed() {
+                    decklist_state.google_drive_api_key_dirty = true;
+                }
+                if response.lost_focus() && decklist_state.google_drive_api_key_dirty {
+                    google_drive_api_key_changed = true;
+                    decklist_state.google_drive_api_key_dirty = false;
+                }
             } else {
                 let mut masked = "*".repeat(decklist_state.google_drive_api_key.len().min(20));
                 if ui.text_edit_singleline(&mut masked).changed() {
@@ -628,10 +651,10 @@ where
     });
 
     DecklistPanelActions {
-        api_key_changed: decklist_state.api_key != original_api_key,
+        browse_marvel_dir_clicked,
+        api_key_changed,
         marvel_dir_changed: decklist_state.marvel_champions_dir != original_marvel_dir,
-        google_drive_api_key_changed: decklist_state.google_drive_api_key
-            != original_google_drive_api_key,
+        google_drive_api_key_changed,
         google_drive_folder_url_changed: decklist_state.google_drive_folder_url
             != original_google_drive_folder_url,
         start_build_drive_index: start_build_index,

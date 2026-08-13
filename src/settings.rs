@@ -18,6 +18,23 @@ const KEYRING_SERVICE: &str = "tcg_layout";
 const OPENAI_KEY_USERNAME: &str = "openai_api_key";
 const GOOGLE_DRIVE_KEY_USERNAME: &str = "google_drive_api_key";
 
+/// Builds a fresh keyring entry and writes (or, for an empty key, deletes)
+/// the password. Building a new `Entry` here (rather than reusing one held
+/// on `self`) keeps this free of any borrow on the manager, so it can run
+/// on a `spawn_blocking` thread independent of the caller's lifetime.
+fn save_key_to_keyring(username: &str, api_key: &str) -> Result<()> {
+    let entry = Entry::new(KEYRING_SERVICE, username)?;
+    if api_key.trim().is_empty() {
+        match entry.delete_password() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(anyhow!("Failed to delete key from keyring: {}", e)),
+        }
+    } else {
+        entry.set_password(api_key)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub layout_params: LayoutParams,
@@ -110,21 +127,20 @@ impl SettingsManager {
         }
     }
 
-    pub fn save_openai_api_key(&self, api_key: &str) -> Result<()> {
-        if api_key.trim().is_empty() {
-            // Delete the key if empty string is provided
-            match self.keyring_entry.delete_password() {
-                Ok(()) => log::debug!("OpenAI API key deleted from keyring"),
-                Err(keyring::Error::NoEntry) => {
-                    log::debug!("No OpenAI API key to delete from keyring")
-                }
-                Err(e) => return Err(anyhow!("Failed to delete API key from keyring: {}", e)),
+    /// Persists the key to the OS keyring on a background thread. Keyring
+    /// backends (e.g. the Secret Service D-Bus API on Linux) can block for a
+    /// long time — sometimes on a system prompt (gnome-keyring's
+    /// gcr-prompter) that isn't visible or focused — so this must never run
+    /// on the UI thread.
+    pub fn save_openai_api_key(&self, api_key: &str) {
+        let api_key = api_key.to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = save_key_to_keyring(OPENAI_KEY_USERNAME, &api_key) {
+                log::error!("Failed to save OpenAI API key: {e}");
+            } else {
+                log::debug!("OpenAI API key saved to keyring");
             }
-        } else {
-            self.keyring_entry.set_password(api_key)?;
-            log::debug!("OpenAI API key saved to keyring");
-        }
-        Ok(())
+        });
     }
 
     pub fn delete_openai_api_key(&self) -> Result<()> {
@@ -155,25 +171,16 @@ impl SettingsManager {
         }
     }
 
-    pub fn save_google_drive_api_key(&self, api_key: &str) -> Result<()> {
-        if api_key.trim().is_empty() {
-            match self.google_drive_keyring_entry.delete_password() {
-                Ok(()) => log::debug!("Google Drive API key deleted from keyring"),
-                Err(keyring::Error::NoEntry) => {
-                    log::debug!("No Google Drive API key to delete from keyring")
-                }
-                Err(e) => {
-                    return Err(anyhow!(
-                        "Failed to delete Google Drive API key from keyring: {}",
-                        e
-                    ))
-                }
+    /// See [`Self::save_openai_api_key`] for why this runs off the UI thread.
+    pub fn save_google_drive_api_key(&self, api_key: &str) {
+        let api_key = api_key.to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = save_key_to_keyring(GOOGLE_DRIVE_KEY_USERNAME, &api_key) {
+                log::error!("Failed to save Google Drive API key: {e}");
+            } else {
+                log::debug!("Google Drive API key saved to keyring");
             }
-        } else {
-            self.google_drive_keyring_entry.set_password(api_key)?;
-            log::debug!("Google Drive API key saved to keyring");
-        }
-        Ok(())
+        });
     }
 
     pub fn get_settings_path(&self) -> &PathBuf {

@@ -116,6 +116,16 @@ struct ExportState {
     error_message: Option<String>,
 }
 
+/// Results of native file/folder dialogs, run off the UI thread (see
+/// `spawn_file_dialog`). Nothing is sent for a cancelled dialog.
+enum DialogMessage {
+    Images(Vec<PathBuf>),
+    CardBack { index: usize, path: PathBuf },
+    DefaultBack(PathBuf),
+    ExportPath { format: ExportFormat, path: PathBuf },
+    MarvelDir(PathBuf),
+}
+
 struct TcgLayoutApp {
     layout_params: LayoutParams,
     validation_errors: Vec<String>,
@@ -146,6 +156,8 @@ struct TcgLayoutApp {
     previous_sharpen: tcg_layout::sharpen::SharpenParams,
     sharpen_preview_state: SharpenPreviewState,
     color_adjust_preview_state: ColorAdjustPreviewState,
+    dialog_sender: mpsc::Sender<DialogMessage>,
+    dialog_receiver: mpsc::Receiver<DialogMessage>,
 }
 
 impl Default for TcgLayoutApp {
@@ -182,6 +194,8 @@ impl Default for TcgLayoutApp {
             ..Default::default()
         };
 
+        let (dialog_sender, dialog_receiver) = mpsc::channel();
+
         Self {
             layout_params: saved_settings.layout_params.clone(),
             validation_errors: Vec::new(),
@@ -212,6 +226,8 @@ impl Default for TcgLayoutApp {
             previous_sharpen: saved_settings.layout_params.sharpen_params(),
             sharpen_preview_state: SharpenPreviewState::default(),
             color_adjust_preview_state: ColorAdjustPreviewState::default(),
+            dialog_sender,
+            dialog_receiver,
         }
     }
 }
@@ -243,51 +259,43 @@ impl TcgLayoutApp {
     }
 
     fn save_api_key(&self) {
-        if let Err(e) = self
-            .settings_manager
-            .save_openai_api_key(&self.decklist_state.api_key)
-        {
-            log::error!("Failed to save API key: {e}");
-        }
+        self.settings_manager
+            .save_openai_api_key(&self.decklist_state.api_key);
     }
 
     fn save_google_drive_api_key(&self) {
-        if let Err(e) = self
-            .settings_manager
-            .save_google_drive_api_key(&self.decklist_state.google_drive_api_key)
-        {
-            log::error!("Failed to save Google Drive API key: {e}");
-        }
+        self.settings_manager
+            .save_google_drive_api_key(&self.decklist_state.google_drive_api_key);
     }
 
     fn import_images(&mut self) {
-        let files = rfd::FileDialog::new()
-            .add_filter("Images", &["jpg", "jpeg", "png", "tiff", "tif"])
-            .set_title("Select Card Images")
-            .pick_files();
-
-        if let Some(paths) = files {
-            let thumbnail_params = ThumbnailParams::from_layout(&self.layout_params);
-            for path in paths {
-                let mut card = Card::new(path.clone());
-
-                // Check if thumbnail is already cached
-                if let Some(thumbnail) = self
-                    .thumbnail_manager
-                    .request_thumbnail(path.clone(), &thumbnail_params)
-                {
-                    // Cache hit - set thumbnail immediately
-                    card.set_thumbnail_loaded(thumbnail);
-                } else {
-                    // Cache miss - set loading state and request async loading
-                    card.set_thumbnail_loading();
-                }
-
-                self.selected_cards.push(card);
+        let sender = self.dialog_sender.clone();
+        tokio::spawn(async move {
+            let files = rfd::AsyncFileDialog::new()
+                .add_filter("Images", &["jpg", "jpeg", "png", "tiff", "tif"])
+                .set_title("Select Card Images")
+                .pick_files()
+                .await;
+            if let Some(files) = files {
+                let paths = files.into_iter().map(PathBuf::from).collect();
+                let _ = sender.send(DialogMessage::Images(paths));
             }
-            // Reset to first page when new cards are added
-            self.preview_state.reset_to_first_page();
-        }
+        });
+    }
+
+    fn pick_marvel_dir(&self) {
+        let sender = self.dialog_sender.clone();
+        let starting_dir = self.decklist_state.marvel_champions_dir.clone();
+        tokio::spawn(async move {
+            let dir = rfd::AsyncFileDialog::new()
+                .set_title("Select Marvel Champions Images Directory")
+                .set_directory(&starting_dir)
+                .pick_folder()
+                .await;
+            if let Some(dir) = dir {
+                let _ = sender.send(DialogMessage::MarvelDir(PathBuf::from(dir)));
+            }
+        });
     }
 
     fn process_thumbnail_messages(&mut self) {
@@ -383,20 +391,34 @@ impl TcgLayoutApp {
         entries
     }
 
-    fn pick_back_image(title: &str) -> Option<PathBuf> {
-        rfd::FileDialog::new()
-            .add_filter("Images", &["jpg", "jpeg", "png", "tiff", "tif"])
-            .set_title(title)
-            .pick_file()
+    /// Spawns the native back-image picker off the UI thread and hands the
+    /// chosen path to `on_picked` (run on `process_dialog_messages`) once the
+    /// dialog resolves.
+    fn spawn_back_image_dialog(
+        &self,
+        title: &'static str,
+        on_picked: impl FnOnce(PathBuf) -> DialogMessage + Send + 'static,
+    ) {
+        let sender = self.dialog_sender.clone();
+        tokio::spawn(async move {
+            let file = rfd::AsyncFileDialog::new()
+                .add_filter("Images", &["jpg", "jpeg", "png", "tiff", "tif"])
+                .set_title(title)
+                .pick_file()
+                .await;
+            if let Some(file) = file {
+                let _ = sender.send(on_picked(PathBuf::from(file)));
+            }
+        });
     }
 
     fn set_card_back(&mut self, index: usize) {
         if index >= self.selected_cards.len() {
             return;
         }
-        if let Some(path) = Self::pick_back_image("Select Card Back Image") {
-            self.selected_cards[index].back_path = Some(path);
-        }
+        self.spawn_back_image_dialog("Select Card Back Image", move |path| {
+            DialogMessage::CardBack { index, path }
+        });
     }
 
     fn clear_card_back(&mut self, index: usize) {
@@ -406,10 +428,10 @@ impl TcgLayoutApp {
     }
 
     fn pick_default_back(&mut self) {
-        if let Some(path) = Self::pick_back_image("Select Default Card Back Image") {
-            self.layout_params.default_back_path = Some(path);
-            self.save_settings();
-        }
+        self.spawn_back_image_dialog(
+            "Select Default Card Back Image",
+            DialogMessage::DefaultBack,
+        );
     }
 
     fn remove_card(&mut self, index: usize) {
@@ -453,34 +475,42 @@ impl TcgLayoutApp {
         if self.selected_cards.is_empty() || self.export_state.is_exporting {
             return;
         }
-
-        let output_file = rfd::FileDialog::new()
-            .set_title("Save SVG Layout")
-            .set_file_name("card_layout.svg")
-            .add_filter("SVG files", &["svg"])
-            .set_directory(".")
-            .save_file();
-
-        if let Some(output_path) = output_file {
-            self.start_export(ExportFormat::Svg, output_path);
-        }
+        self.spawn_export_path_dialog(ExportFormat::Svg, "Save SVG Layout", "card_layout.svg", "SVG files", &["svg"]);
     }
 
     fn export_to_pdf(&mut self) {
         if self.selected_cards.is_empty() || self.export_state.is_exporting {
             return;
         }
+        self.spawn_export_path_dialog(ExportFormat::Pdf, "Save PDF Layout", "card_layout.pdf", "PDF files", &["pdf"]);
+    }
 
-        let output_file = rfd::FileDialog::new()
-            .set_title("Save PDF Layout")
-            .set_file_name("card_layout.pdf")
-            .add_filter("PDF files", &["pdf"])
-            .set_directory(".")
-            .save_file();
-
-        if let Some(output_path) = output_file {
-            self.start_export(ExportFormat::Pdf, output_path);
-        }
+    /// Spawns the native save-file picker off the UI thread; the chosen path
+    /// arrives via `DialogMessage::ExportPath` on `process_dialog_messages`.
+    fn spawn_export_path_dialog(
+        &self,
+        format: ExportFormat,
+        title: &'static str,
+        default_file_name: &'static str,
+        filter_name: &'static str,
+        filter_extensions: &'static [&'static str],
+    ) {
+        let sender = self.dialog_sender.clone();
+        tokio::spawn(async move {
+            let output_file = rfd::AsyncFileDialog::new()
+                .set_title(title)
+                .set_file_name(default_file_name)
+                .add_filter(filter_name, filter_extensions)
+                .set_directory(".")
+                .save_file()
+                .await;
+            if let Some(output_file) = output_file {
+                let _ = sender.send(DialogMessage::ExportPath {
+                    format,
+                    path: PathBuf::from(output_file),
+                });
+            }
+        });
     }
 
     fn start_export(&mut self, format: ExportFormat, output_path: PathBuf) {
@@ -598,6 +628,51 @@ impl TcgLayoutApp {
                     self.export_state.error_message = Some(error);
                     self.export_receiver = None;
                     self.export_task = None;
+                }
+            }
+        }
+    }
+
+    fn process_dialog_messages(&mut self) {
+        while let Ok(message) = self.dialog_receiver.try_recv() {
+            match message {
+                DialogMessage::Images(paths) => {
+                    let thumbnail_params = ThumbnailParams::from_layout(&self.layout_params);
+                    for path in paths {
+                        let mut card = Card::new(path.clone());
+
+                        // Check if thumbnail is already cached
+                        if let Some(thumbnail) = self
+                            .thumbnail_manager
+                            .request_thumbnail(path.clone(), &thumbnail_params)
+                        {
+                            // Cache hit - set thumbnail immediately
+                            card.set_thumbnail_loaded(thumbnail);
+                        } else {
+                            // Cache miss - set loading state and request async loading
+                            card.set_thumbnail_loading();
+                        }
+
+                        self.selected_cards.push(card);
+                    }
+                    // Reset to first page when new cards are added
+                    self.preview_state.reset_to_first_page();
+                }
+                DialogMessage::CardBack { index, path } => {
+                    if let Some(card) = self.selected_cards.get_mut(index) {
+                        card.back_path = Some(path);
+                    }
+                }
+                DialogMessage::DefaultBack(path) => {
+                    self.layout_params.default_back_path = Some(path);
+                    self.save_settings();
+                }
+                DialogMessage::ExportPath { format, path } => {
+                    self.start_export(format, path);
+                }
+                DialogMessage::MarvelDir(path) => {
+                    self.decklist_state.marvel_champions_dir = path;
+                    self.save_settings();
                 }
             }
         }
@@ -969,6 +1044,9 @@ impl eframe::App for TcgLayoutApp {
         // Process export messages
         self.process_export_messages();
 
+        // Process results from native file/folder dialogs
+        self.process_dialog_messages();
+
         // Request repaint if we have pending thumbnails or AI matching to keep UI updating
         if self.thumbnail_manager.has_pending_requests()
             || self.decklist_state.is_processing
@@ -1037,6 +1115,7 @@ impl eframe::App for TcgLayoutApp {
         let mut google_drive_api_key_changed = false;
         let mut google_drive_folder_url_changed = false;
         let mut start_build_drive_index_action = false;
+        let mut browse_marvel_dir_clicked = false;
 
         egui::SidePanel::left("left_panel")
             .resizable(true)
@@ -1084,6 +1163,7 @@ impl eframe::App for TcgLayoutApp {
                     google_drive_api_key_changed = actions.google_drive_api_key_changed;
                     google_drive_folder_url_changed = actions.google_drive_folder_url_changed;
                     start_build_drive_index_action = actions.start_build_drive_index;
+                    browse_marvel_dir_clicked = actions.browse_marvel_dir_clicked;
                 }
             });
 
@@ -1104,6 +1184,11 @@ impl eframe::App for TcgLayoutApp {
             } else {
                 self.move_card_down(index);
             }
+        }
+
+        // Handle Marvel Champions directory browse request
+        if browse_marvel_dir_clicked {
+            self.pick_marvel_dir();
         }
 
         // Handle import request
