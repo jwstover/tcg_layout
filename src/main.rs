@@ -6,6 +6,7 @@ pub mod image_processing;
 pub mod layout;
 pub mod marvelcdb;
 pub mod pdf_export;
+pub mod project;
 pub mod settings;
 pub mod style;
 pub mod svg_export;
@@ -18,6 +19,7 @@ use crate::google_drive::GoogleDriveMessage;
 use crate::image_processing::ThumbnailParams;
 use crate::marvelcdb::MarvelCdbMessage;
 use crate::pdf_export::export_pages_to_pdf_with_progress;
+use crate::project::{Project, ProjectCard, PROJECT_FILE_EXTENSION};
 use crate::settings::{AppSettings, SettingsManager};
 use crate::svg_export::export_pages_to_single_svg_with_progress;
 use eframe::egui;
@@ -124,6 +126,8 @@ enum DialogMessage {
     DefaultBack(PathBuf),
     ExportPath { format: ExportFormat, path: PathBuf },
     MarvelDir(PathBuf),
+    SaveProjectPath(PathBuf),
+    OpenProjectPath(PathBuf),
 }
 
 struct TcgLayoutApp {
@@ -150,6 +154,8 @@ struct TcgLayoutApp {
     drive_index_receiver: Option<mpsc::Receiver<GoogleDriveMessage>>,
     drive_index_task: Option<JoinHandle<()>>,
     settings_manager: SettingsManager,
+    current_project_path: Option<PathBuf>,
+    recent_projects: Vec<PathBuf>,
     previous_bleed_enabled: bool,
     previous_bleed_mm: f32,
     previous_sharpen_enabled: bool,
@@ -220,6 +226,8 @@ impl Default for TcgLayoutApp {
             drive_index_receiver: None,
             drive_index_task: None,
             settings_manager,
+            current_project_path: None,
+            recent_projects: saved_settings.recent_projects.clone(),
             previous_bleed_enabled: saved_settings.layout_params.enable_bleed,
             previous_bleed_mm: saved_settings.layout_params.bleed_mm,
             previous_sharpen_enabled: saved_settings.layout_params.enable_sharpen,
@@ -251,6 +259,7 @@ impl TcgLayoutApp {
             card_size_option: self.card_size_option,
             marvel_champions_dir: Some(self.decklist_state.marvel_champions_dir.clone()),
             google_drive_folder_id,
+            recent_projects: self.recent_projects.clone(),
         };
 
         if let Err(e) = self.settings_manager.save_settings(&settings) {
@@ -296,6 +305,126 @@ impl TcgLayoutApp {
                 let _ = sender.send(DialogMessage::MarvelDir(PathBuf::from(dir)));
             }
         });
+    }
+
+    fn spawn_open_project_dialog(&self) {
+        let sender = self.dialog_sender.clone();
+        tokio::spawn(async move {
+            let file = rfd::AsyncFileDialog::new()
+                .add_filter("TCG Layout Project", &[PROJECT_FILE_EXTENSION])
+                .set_title("Open Project")
+                .pick_file()
+                .await;
+            if let Some(file) = file {
+                let _ = sender.send(DialogMessage::OpenProjectPath(PathBuf::from(file)));
+            }
+        });
+    }
+
+    fn spawn_save_project_dialog(&self) {
+        let sender = self.dialog_sender.clone();
+        tokio::spawn(async move {
+            let file = rfd::AsyncFileDialog::new()
+                .add_filter("TCG Layout Project", &[PROJECT_FILE_EXTENSION])
+                .set_file_name(format!("project.{PROJECT_FILE_EXTENSION}"))
+                .set_title("Save Project As")
+                .save_file()
+                .await;
+            if let Some(file) = file {
+                let _ = sender.send(DialogMessage::SaveProjectPath(PathBuf::from(file)));
+            }
+        });
+    }
+
+    /// Saves to the current project path, or prompts for one if this project
+    /// hasn't been saved before.
+    fn save_project(&mut self) {
+        match self.current_project_path.clone() {
+            Some(path) => self.write_project_to_path(path),
+            None => self.spawn_save_project_dialog(),
+        }
+    }
+
+    fn build_project(&self) -> Project {
+        Project {
+            layout_params: self.layout_params.clone(),
+            page_size_option: self.page_size_option,
+            card_size_option: self.card_size_option,
+            cards: self.selected_cards.iter().map(ProjectCard::from).collect(),
+        }
+    }
+
+    fn write_project_to_path(&mut self, path: PathBuf) {
+        let project = self.build_project();
+        match project.save_to_file(&path) {
+            Ok(()) => {
+                self.current_project_path = Some(path.clone());
+                settings::record_recent_project(&mut self.recent_projects, path);
+                self.save_settings();
+                self.show_success_message = true;
+                self.success_message_timer = 3.0;
+            }
+            Err(e) => {
+                log::error!("Failed to save project: {e}");
+            }
+        }
+    }
+
+    /// Clears the working state and starts a fresh, unsaved project.
+    fn new_project(&mut self) {
+        self.selected_cards.clear();
+        self.back_cards.clear();
+        self.preview_state.reset_to_first_page();
+        self.preview_state.clear_texture_cache();
+        self.layout_params = LayoutParams::default();
+        self.page_size_option = PageSizeOption::A4;
+        self.card_size_option = CardSizeOption::Poker;
+        self.current_project_path = None;
+    }
+
+    /// Replaces the working state with a loaded project. Card thumbnails are
+    /// requested the same way freshly-imported images are; a card whose file
+    /// has moved or been deleted still loads (surfacing as a failed
+    /// thumbnail rather than a load error), so the rest of the project isn't
+    /// lost over one missing image.
+    fn load_project_from_path(&mut self, path: PathBuf) {
+        let project = match Project::load_from_file(&path) {
+            Ok(project) => project,
+            Err(e) => {
+                log::error!("Failed to load project from {path:?}: {e}");
+                return;
+            }
+        };
+
+        self.back_cards.clear();
+        self.preview_state.reset_to_first_page();
+        self.preview_state.clear_texture_cache();
+
+        self.layout_params = project.layout_params;
+        self.page_size_option = project.page_size_option;
+        self.card_size_option = project.card_size_option;
+
+        let thumbnail_params = ThumbnailParams::from_layout(&self.layout_params);
+        self.selected_cards = project
+            .cards
+            .iter()
+            .map(|project_card| {
+                let mut card = project_card.to_card();
+                if let Some(thumbnail) = self
+                    .thumbnail_manager
+                    .request_thumbnail(card.path.clone(), &thumbnail_params)
+                {
+                    card.set_thumbnail_loaded(thumbnail);
+                } else {
+                    card.set_thumbnail_loading();
+                }
+                card
+            })
+            .collect();
+
+        self.current_project_path = Some(path.clone());
+        settings::record_recent_project(&mut self.recent_projects, path);
+        self.save_settings();
     }
 
     fn process_thumbnail_messages(&mut self) {
@@ -428,10 +557,7 @@ impl TcgLayoutApp {
     }
 
     fn pick_default_back(&mut self) {
-        self.spawn_back_image_dialog(
-            "Select Default Card Back Image",
-            DialogMessage::DefaultBack,
-        );
+        self.spawn_back_image_dialog("Select Default Card Back Image", DialogMessage::DefaultBack);
     }
 
     fn remove_card(&mut self, index: usize) {
@@ -475,14 +601,26 @@ impl TcgLayoutApp {
         if self.selected_cards.is_empty() || self.export_state.is_exporting {
             return;
         }
-        self.spawn_export_path_dialog(ExportFormat::Svg, "Save SVG Layout", "card_layout.svg", "SVG files", &["svg"]);
+        self.spawn_export_path_dialog(
+            ExportFormat::Svg,
+            "Save SVG Layout",
+            "card_layout.svg",
+            "SVG files",
+            &["svg"],
+        );
     }
 
     fn export_to_pdf(&mut self) {
         if self.selected_cards.is_empty() || self.export_state.is_exporting {
             return;
         }
-        self.spawn_export_path_dialog(ExportFormat::Pdf, "Save PDF Layout", "card_layout.pdf", "PDF files", &["pdf"]);
+        self.spawn_export_path_dialog(
+            ExportFormat::Pdf,
+            "Save PDF Layout",
+            "card_layout.pdf",
+            "PDF files",
+            &["pdf"],
+        );
     }
 
     /// Spawns the native save-file picker off the UI thread; the chosen path
@@ -673,6 +811,12 @@ impl TcgLayoutApp {
                 DialogMessage::MarvelDir(path) => {
                     self.decklist_state.marvel_champions_dir = path;
                     self.save_settings();
+                }
+                DialogMessage::SaveProjectPath(path) => {
+                    self.write_project_to_path(path);
+                }
+                DialogMessage::OpenProjectPath(path) => {
+                    self.load_project_from_path(path);
                 }
             }
         }
@@ -1059,10 +1203,54 @@ impl eframe::App for TcgLayoutApp {
 
         ctx.set_style(style::style());
 
+        let project_label = self
+            .current_project_path
+            .as_ref()
+            .map(|p| project::display_name(p))
+            .unwrap_or_else(|| "Untitled".to_string());
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "{project_label} - TCG Layout App"
+        )));
+
         // Menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("New Project").clicked() {
+                        self.new_project();
+                        ui.close_menu();
+                    }
+                    if ui.button("Open Project...").clicked() {
+                        self.spawn_open_project_dialog();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Save Project").clicked() {
+                        self.save_project();
+                        ui.close_menu();
+                    }
+                    if ui.button("Save Project As...").clicked() {
+                        self.spawn_save_project_dialog();
+                        ui.close_menu();
+                    }
+                    ui.menu_button("Recent Projects", |ui| {
+                        if self.recent_projects.is_empty() {
+                            ui.label("No Recent Projects");
+                        } else {
+                            for path in self.recent_projects.clone() {
+                                let label = project::display_name(&path);
+                                if ui
+                                    .button(label)
+                                    .on_hover_text(path.to_string_lossy())
+                                    .clicked()
+                                {
+                                    self.load_project_from_path(path);
+                                    ui.close_menu();
+                                }
+                            }
+                        }
+                    });
+                    ui.separator();
                     if ui.button("Import Images...").clicked() {
                         self.import_images();
                         ui.close_menu();

@@ -15,7 +15,7 @@ Desktop application that automatically lays out Trading Card Game (TCG) card ima
 
 ### Build Commands
 - `cargo run --bin tcg_layout` - Run the application
-- `cargo test` - Run all tests (~342 test executions; shared modules run in both the lib and bin trees)
+- `cargo test` - Run all tests (~351 test executions; shared modules run in both the lib and bin trees)
 - `cargo clippy` - Run linter checks
 - `cargo fmt` - Format code
 
@@ -53,7 +53,8 @@ src/
   thumbnail_manager.rs - Async thumbnail loading with LRU cache and file mod-time tracking
   svg_export.rs        - SVG export with cut marks, bleed/sharpen processing, multi-page Inkscape layers
   pdf_export.rs        - PDF export with image deduplication, DPI scaling, bleed/sharpen support
-  settings.rs          - Settings persistence to ~/.config/tcg_layout/settings.json
+  project.rs           - Project save/load: layout params + card list (paths only) as JSON (.tcgproj)
+  settings.rs          - Settings persistence to ~/.config/tcg_layout/settings.json (incl. recent projects list)
   decklist.rs          - Decklist parsing and AI-powered card-to-file matching via OpenAI
   style.rs             - Custom dark mode theme configuration
   ui/
@@ -233,9 +234,15 @@ printable area" scales by exactly 1.0 and centers exactly.
 
 **6. Settings** (`settings.rs`)
 - Persists to `~/.config/tcg_layout/settings.json`
-- Stores: layout_params, page_size_option, card_size_option
+- Stores: layout_params, page_size_option, card_size_option, recent_projects (MRU list, capped at 10 via `record_recent_project()`)
 - OpenAI API key stored securely via system keyring (keyring crate)
 - Graceful defaults when settings file is missing
+
+**6b. Projects** (`project.rs`)
+- `Project` struct: `layout_params`, `page_size_option`, `card_size_option`, `cards: Vec<ProjectCard>`. Saved as pretty-printed JSON with a `.tcgproj` extension (`PROJECT_FILE_EXTENSION`)
+- `ProjectCard` holds only `path`, `back_path`, `copy_count` — no image data or thumbnails. `ProjectCard::to_card()` rebuilds a `Card` via `Card::new()` (re-reads DPI from disk); a moved/deleted file still loads, surfacing as a failed thumbnail rather than aborting the whole project load
+- `TcgLayoutApp` (`main.rs`) owns `current_project_path` (`None` = unsaved/untitled) and `recent_projects`. "Save Project" writes to `current_project_path` if set, otherwise falls back to "Save Project As..."; both go through the same native-dialog + `DialogMessage` pattern as image import. The window title reflects the current project name (or "Untitled") every frame via `ViewportCommand::Title`
+- Loading/starting a project does **not** touch `layout_params`' bleed/sharpen fields' change-detection (`previous_bleed_*`/`previous_sharpen`) directly — thumbnails for the newly loaded cards are requested explicitly in `load_project_from_path()`, the same way fresh image imports are
 
 **7. Decklist Matching** (`decklist.rs`)
 - Parses decklist text (format: "N CardName", skips comments/empty lines)
@@ -286,6 +293,7 @@ printable area" scales by exactly 1.0 and centers exactly.
 - Printer margins: exports sized to the printer's printable area so a forced-margin printer neither scales nor shifts the page
 - Double-sided (duplex) printing: interleaved back pages with mirrored positions (flip-edge aware), automatic 180° back rotation when the flip axis requires it (cards always cut head-to-head), per-card and default back images, printer calibration offset, front-only cut marks
 - Settings persistence (JSON file + secure keyring for API key)
+- Projects: save/open layout params + card list (front/back filenames, copy counts) as `.tcgproj` JSON, "Save"/"Save As", Recent Projects menu, window title reflects current project
 - Decklist parsing and AI-powered card-to-file matching (OpenAI)
 - Card reordering in the UI
 - DPI detection from EXIF/PNG pHYs/TIFF metadata
@@ -293,6 +301,8 @@ printable area" scales by exactly 1.0 and centers exactly.
 - Card type detection by aspect ratio
 
 ### Not Yet Implemented
+- Multiple projects open simultaneously (tabs/switcher) — currently one project active at a time, save/open like a normal document
+- Unsaved-changes tracking (no dirty flag / prompt-to-save on "New Project" or quit)
 - Print dialog integration (direct OS print)
 - Mixed card sizes within a single layout
 - Layout templates/presets
@@ -303,7 +313,7 @@ printable area" scales by exactly 1.0 and centers exactly.
 
 ### Test Structure
 - Unit tests colocated in each module using `#[cfg(test)]`
-- ~342 test executions total (shared modules compile into both lib and bin trees)
+- ~351 test executions total (shared modules compile into both lib and bin trees)
 - Async tests in `thumbnail_manager.rs` use tokio runtime
 
 ### Running Tests
@@ -316,6 +326,7 @@ cargo test thumbnail          # Thumbnail manager tests
 cargo test svg                # SVG export tests
 cargo test pdf                # PDF export tests
 cargo test settings           # Settings persistence tests
+cargo test project            # Project save/load tests
 ```
 
 ### Test Coverage Areas
@@ -327,7 +338,8 @@ cargo test settings           # Settings persistence tests
 - Thumbnail manager (7 tests): async loading, caching, deduplication, cache key discrimination
 - SVG export (24 tests): single/multi-page, cut marks (front pages only, emitted after images), bleed, sharpening, processed image directory, backs-only adjustment scoping, printer margins (page size is the printable area, content shifted into it, unshifted when disabled)
 - PDF export (17 tests): multi-page, real images, sharpening, sharpening + bleed, duplex end-to-end, backs-only adjustment scoping, printer margins (MediaBox is the printable area / the whole sheet when disabled, duplex end-to-end)
-- Settings (9 tests): serialization, defaults, duplex backwards compatibility, printer margin backwards compatibility (absent fields load with the feature off) and round trip
+- Settings (12 tests): serialization, defaults, duplex backwards compatibility, printer margin backwards compatibility (absent fields load with the feature off) and round trip, recent-projects backwards compatibility/dedup/cap
+- Projects (6 tests): round trip through JSON, `Card`⇄`ProjectCard` conversion, `cards` defaults to empty when absent (backwards compat), missing-file load error, display name derivation, per-card default `copy_count` when absent
 - Types (various): enum behavior, defaults, validation
 
 ## Common Development Tasks

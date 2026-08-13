@@ -44,6 +44,28 @@ pub struct AppSettings {
     pub marvel_champions_dir: Option<PathBuf>,
     #[serde(default)]
     pub google_drive_folder_id: Option<String>,
+    /// Most-recently-opened project files, newest first.
+    #[serde(default)]
+    pub recent_projects: Vec<PathBuf>,
+}
+
+/// Cap on `AppSettings::recent_projects`, applied whenever an entry is added.
+const MAX_RECENT_PROJECTS: usize = 10;
+
+/// Moves `path` to the front of a recent-projects list (de-duplicating it if
+/// already present) and truncates to `MAX_RECENT_PROJECTS`. Shared by
+/// `AppSettings::record_recent_project` and the app's own in-memory list, so
+/// the two never drift apart.
+pub fn record_recent_project(list: &mut Vec<PathBuf>, path: PathBuf) {
+    list.retain(|p| p != &path);
+    list.insert(0, path);
+    list.truncate(MAX_RECENT_PROJECTS);
+}
+
+impl AppSettings {
+    pub fn record_recent_project(&mut self, path: PathBuf) {
+        record_recent_project(&mut self.recent_projects, path);
+    }
 }
 
 impl Default for AppSettings {
@@ -54,6 +76,7 @@ impl Default for AppSettings {
             card_size_option: CardSizeOption::Poker,
             marvel_champions_dir: None,
             google_drive_folder_id: None,
+            recent_projects: Vec::new(),
         }
     }
 }
@@ -346,6 +369,42 @@ mod tests {
             loaded.layout_params.printer_margins,
             settings.layout_params.printer_margins
         );
+    }
+
+    #[test]
+    fn test_settings_backwards_compatible_without_recent_projects() {
+        // Settings saved before project files existed won't have this field
+        let settings = AppSettings::default();
+        let mut value = serde_json::to_value(&settings).unwrap();
+        value.as_object_mut().unwrap().remove("recent_projects");
+
+        let loaded: AppSettings = serde_json::from_value(value).unwrap();
+        assert!(loaded.recent_projects.is_empty());
+    }
+
+    #[test]
+    fn test_record_recent_project_dedupes_and_moves_to_front() {
+        let mut settings = AppSettings::default();
+        settings.record_recent_project(PathBuf::from("a.tcgproj"));
+        settings.record_recent_project(PathBuf::from("b.tcgproj"));
+        settings.record_recent_project(PathBuf::from("a.tcgproj"));
+
+        assert_eq!(
+            settings.recent_projects,
+            vec![PathBuf::from("a.tcgproj"), PathBuf::from("b.tcgproj")]
+        );
+    }
+
+    #[test]
+    fn test_record_recent_project_caps_length() {
+        let mut settings = AppSettings::default();
+        for i in 0..15 {
+            settings.record_recent_project(PathBuf::from(format!("{i}.tcgproj")));
+        }
+
+        assert_eq!(settings.recent_projects.len(), MAX_RECENT_PROJECTS);
+        // Most recent (last inserted) stays at the front
+        assert_eq!(settings.recent_projects[0], PathBuf::from("14.tcgproj"));
     }
 
     #[test]
